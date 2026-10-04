@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from friday.brain import LOG_PATH
-from friday.brain_manager import BrainManager
+from friday.brain_manager import BrainManager, BrainRequestMetadata
 from friday.conversation import ConversationHistory
 from friday.laya_client import RemoteLayaClient
 from friday.profile import AssistantProfile
@@ -45,11 +45,18 @@ class FridayCore:
         """Return safe status metadata for whichever typed decision providers are configured."""
         return self._systemone_manager.status
 
-    def respond(self, command: str, on_status: Callable[[str], None] | None = None) -> tuple[str, int | None, RoutingDecision]:
+    def respond(
+        self,
+        command: str,
+        on_status: Callable[[str], None] | None = None,
+        request_metadata: BrainRequestMetadata | None = None,
+    ) -> tuple[str, int | None, RoutingDecision]:
         decision = self._router.route(command)
         ambiguity = getattr(self._router, "ambiguous_routes", None)
         candidates = ambiguity(command) if callable(ambiguity) else None
-        if candidates:
+        if candidates and (
+            request_metadata is None or request_metadata.sensitivity != "private"
+        ):
             remote_decision = self._systemone_manager.classify_route(command, candidates)
             if remote_decision is not None:
                 decision = RoutingDecision(
@@ -73,7 +80,15 @@ class FridayCore:
             self.pending_approval = command if risk == Risk.CONFIRM else None
             return answer, None, decision
 
-        reply = self._brain_manager.respond(command, self._history.messages(), on_status)
+        if request_metadata is None:
+            reply = self._brain_manager.respond(command, self._history.messages(), on_status)
+        else:
+            reply = self._brain_manager.respond(
+                command,
+                self._history.messages(),
+                on_status,
+                request_metadata=request_metadata,
+            )
         answer = reply.text
         self._history.add_exchange(command, answer)
         with LOG_PATH.open("a", encoding="utf-8") as log:

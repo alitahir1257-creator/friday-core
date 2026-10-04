@@ -28,7 +28,7 @@ For zero-cost use, keep the Cloudflare account on the Workers Free plan. Cloudfl
 
 ### Optional FreeLLMAPI gateway
 
-FreeLLMAPI is an optional downstream gateway behind `BrainManager`; it does not replace FRIDAY's provider selection or local Qwen fallback. When Cloudflare is explicitly enabled, FRIDAY tries it first, then an enabled FreeLLMAPI gateway, then local Qwen. FreeLLMAPI owns its downstream provider catalog, credentials, quotas, and fallback routing. OmniRoute remains planned for Phase 4B as a separate upper-level FRIDAY routing layer.
+FreeLLMAPI is an optional downstream gateway behind `BrainManager`; it does not replace FRIDAY's provider selection or local Qwen fallback. When OmniRoute is disabled, FRIDAY preserves the existing order: explicitly enabled Cloudflare, FreeLLMAPI, then local Qwen. When OmniRoute is enabled, FRIDAY tries OmniRoute, FreeLLMAPI, explicitly enabled Cloudflare, then local Qwen. Each remote provider gets at most one FRIDAY attempt before fallback.
 
 The gateway is disabled by default. To opt in, set these Windows environment variables and restart FRIDAY:
 
@@ -39,6 +39,26 @@ The gateway is disabled by default. To opt in, set these Windows environment var
 - `FRIDAY_FREELLMAPI_TIMEOUT_SECONDS` (optional; defaults to `15`)
 
 FRIDAY makes one non-streaming OpenAI-compatible chat-completions request. A disabled, unconfigured, failed, timed-out, rate-limited, or malformed gateway response falls through to local Qwen. Use FreeLLMAPI's free provider configuration only; do not enable premium features or billing. Keep individual downstream provider keys in FreeLLMAPI, never in FRIDAY. The unified gateway key is never stored in `profile.json` or written to logs.
+
+### Optional OmniRoute orchestration gateway
+
+OmniRoute is a separate optional OpenAI-compatible gateway in front of FRIDAY's existing provider fallbacks. It is disabled by default. FRIDAY does not install or start OmniRoute, enable its MCP/A2A/Memory/Skills features, configure downstream providers, or select a paid model. `model=auto` is the documented generic routing value, but it does not guarantee a free route. Enable this provider only after configuring and checking the local OmniRoute route and its cost.
+
+Set these Windows environment variables to opt in, then restart FRIDAY:
+
+- `FRIDAY_OMNIROUTE_ENABLED=true`
+- `FRIDAY_OMNIROUTE_BASE_URL` (optional; defaults to `http://127.0.0.1:20128/v1`)
+- `FRIDAY_OMNIROUTE_API_KEY` (optional unless the local OmniRoute instance requires API-key authentication; environment only)
+- `FRIDAY_OMNIROUTE_MODEL` (optional; defaults to documented `auto`)
+- `FRIDAY_OMNIROUTE_TIMEOUT_SECONDS` (optional; defaults to `15`, maximum `60`)
+
+FRIDAY sends one non-streaming request to `/chat/completions`. Timeout, HTTP errors, or malformed responses proceed to the next configured provider without an FRIDAY retry loop. The API key is not stored in `profile.json` or written to logs. Requests marked `private` through the `BrainRequestMetadata` hook skip remote System-One route hints and use only brain-provider names explicitly listed as trusted; otherwise they go to local Qwen. Current UI requests are not automatically classified, so keep private or sensitive material on local Qwen or a provider whose trust and handling you have verified.
+
+The OmniRoute base URL is restricted to a loopback IP address, so this integration cannot silently send requests to a remote gateway.
+
+FreeLLMAPI and OmniRoute remain parallel FRIDAY providers. OmniRoute documents dynamic OpenAI-compatible downstream providers, but its current official documentation also describes a guarded fetch path that blocks private/local URLs. FRIDAY does not disable that guard or configure a loopback FreeLLMAPI endpoint inside OmniRoute. The Kilo route previously used through FreeLLMAPI may log prompts and outputs for training; `auto` is not a privacy-safe route. Keep private data on local Qwen or explicitly trusted configured providers.
+
+The official project documents MCP (`omniroute --mcp`), A2A, Memory, and Skills, but those features are deferred and are not part of FRIDAY's integration. If OmniRoute is not installed, its official Windows npm path is to use a Node.js version allowed by package metadata (`>=20.20.2 <21`, `>=22.22.2 <23`, or `>=24.0.0 <25`), run `npm install -g omniroute`, then run `omniroute` in PowerShell. The server and dashboard use port `20128` by default. Create an API key in Dashboard → Endpoints only if the instance requires one, then set it in `FRIDAY_OMNIROUTE_API_KEY`; do not paste the key into `profile.json` or source files. See the [official OmniRoute README](https://github.com/Xchat1/omniroute), [User Guide](https://github.com/Xchat1/omniroute/blob/main/docs/USER_GUIDE.md), and [runtime package metadata](https://raw.githubusercontent.com/Xchat1/omniroute/main/package.json) for current install requirements.
 
 ## Optional remote Laya System-1
 
