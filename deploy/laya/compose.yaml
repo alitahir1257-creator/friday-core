@@ -1,0 +1,26 @@
+services:
+  laya:
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      LAYA_HOST: "0.0.0.0"
+      LAYA_PORT: "8000"
+      LAYA_DEVICE: "cpu"
+      LAYA_PRELOAD: "1"
+      LAYA_MODELS: "english"
+      LAYA_MAX_LOADED: "1"
+      LAYA_THREADS: "2"
+      LAYA_API_KEY: "${LAYA_API_KEY:?Set LAYA_API_KEY in the deployment environment}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)); raise SystemExit(d.get('status') != 'ok')"
+      interval: 30s
+      timeout: 5s
+      start_period: 10m
+      retries: 3

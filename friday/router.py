@@ -71,12 +71,7 @@ class BuiltinRouter:
     def route(self, command: str) -> RoutingDecision:
         normalized = command.casefold()
         # Computer commands are planned only when relevant; GENERAL stays small.
-        from friday.capabilities.computer.parser import DeterministicComputerPlanner
-        from friday.capabilities.computer.policy import ApprovalPolicy
-        from friday.capabilities.registry import Risk
-
-        if (DeterministicComputerPlanner().plan(command) is not None
-                or ApprovalPolicy().classify_request(command) in {Risk.BLOCKED, Risk.CONFIRM}):
+        if self._is_computer_or_sensitive(command):
             return RoutingDecision(Route.COMPUTER, 0.95, "deterministic computer command or safety policy")
         for route, terms in self._route_terms:
             for term in terms:
@@ -90,6 +85,31 @@ class BuiltinRouter:
             route=Route.GENERAL,
             confidence=0.6,
             reason="no specialized route keyword matched",
+        )
+
+    def ambiguous_routes(self, command: str) -> tuple[Route, ...] | None:
+        """Return explicit candidates only when multiple route families match."""
+        if self._is_computer_or_sensitive(command):
+            return None
+
+        normalized = command.casefold()
+        matches: list[Route] = []
+        for route, terms in self._route_terms:
+            if any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized) for term in terms):
+                matches.append(route)
+        if len(matches) < 2:
+            return None
+        return (Route.GENERAL, *matches)
+
+    @staticmethod
+    def _is_computer_or_sensitive(command: str) -> bool:
+        from friday.capabilities.computer.parser import DeterministicComputerPlanner
+        from friday.capabilities.computer.policy import ApprovalPolicy
+        from friday.capabilities.registry import Risk
+
+        return (
+            DeterministicComputerPlanner().plan(command) is not None
+            or ApprovalPolicy().classify_request(command) in {Risk.BLOCKED, Risk.CONFIRM}
         )
 
 

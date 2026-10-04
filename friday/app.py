@@ -45,6 +45,9 @@ class FridayWindow:
         ttk.Label(footer, text="status:").pack(side="left")
         self.status = tk.StringVar(value="READY")
         ttk.Label(footer, textvariable=self.status).pack(side="left", padx=(4, 0))
+        self.remote_laya_status = tk.StringVar()
+        ttk.Label(footer, textvariable=self.remote_laya_status).pack(side="right")
+        self._refresh_laya_status()
         self.input.focus_set()
 
     def _on_enter(self, _event: tk.Event[Any]) -> str:
@@ -68,7 +71,12 @@ class FridayWindow:
                 self.root.after(0, self._show_error, str(error))
             return
         if not self._closing:
+            self.root.after(0, self._refresh_laya_status)
             self.root.after(0, self._show_response, answer)
+
+    def _refresh_laya_status(self) -> None:
+        label = self.core.laya_status.replace("_", " ").title()
+        self.remote_laya_status.set(f"Laya remote: {label}")
 
     def _queue_status(self, status: str) -> None:
         self.brain_status = status

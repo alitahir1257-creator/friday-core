@@ -18,6 +18,7 @@ class AssistantProfile:
     language: str = "auto"
     default_response_style: str = "concise"
     cloud_brain_enabled: bool = False
+    laya_enabled: bool = False
 
     def system_prompt(self) -> str:
         language_rule = (
@@ -58,4 +59,8 @@ def load_profile(path: Path = PROFILE_PATH) -> AssistantProfile:
     if not isinstance(cloud_enabled, bool):
         raise RuntimeError("cloud_brain_enabled must be true or false.")
     values["cloud_brain_enabled"] = cloud_enabled
+    laya_enabled = supplied.get("laya_enabled", defaults.laya_enabled)
+    if not isinstance(laya_enabled, bool):
+        raise RuntimeError("laya_enabled must be true or false.")
+    values["laya_enabled"] = laya_enabled
     return AssistantProfile(**values)
