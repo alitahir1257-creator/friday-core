@@ -17,6 +17,7 @@ class AssistantProfile:
     user_name: str = "Ali"
     language: str = "auto"
     default_response_style: str = "concise"
+    cloud_brain_enabled: bool = False
 
     def system_prompt(self) -> str:
         language_rule = (
@@ -25,7 +26,7 @@ class AssistantProfile:
             else f"Respond in {self.language}."
         )
         return (
-            f"You are {self.assistant_name}, a local assistant for "
+            f"You are {self.assistant_name}, an assistant for "
             f"{self.user_name}. {language_rule} "
             f"Keep replies {self.default_response_style}. "
             "When asked for exact text, output only that text."
@@ -53,4 +54,8 @@ def load_profile(path: Path = PROFILE_PATH) -> AssistantProfile:
             "default_response_style",
         )
     }
+    cloud_enabled = supplied.get("cloud_brain_enabled", defaults.cloud_brain_enabled)
+    if not isinstance(cloud_enabled, bool):
+        raise RuntimeError("cloud_brain_enabled must be true or false.")
+    values["cloud_brain_enabled"] = cloud_enabled
     return AssistantProfile(**values)

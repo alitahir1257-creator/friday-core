@@ -2,5 +2,6 @@
   "assistant_name": "Friday",
   "user_name": "Ali",
   "language": "auto",
-  "default_response_style": "concise"
+  "default_response_style": "concise",
+  "cloud_brain_enabled": false
 }

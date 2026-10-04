@@ -16,6 +16,7 @@ class FridayWindow:
         self.root = root
         self.core = core
         self._closing = False
+        self.brain_status = "READY"
         self._computer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="friday-computer")
         self.root.title("Friday Core")
         self.root.geometry("480x330")
@@ -70,8 +71,10 @@ class FridayWindow:
             self.root.after(0, self._show_response, answer)
 
     def _queue_status(self, status: str) -> None:
+        self.brain_status = status
+        compact_status = "THINKING" if status in {"THINKING_CLOUD", "THINKING_LOCAL", "STARTING_LOCAL_BRAIN"} else status
         if not self._closing:
-            self.root.after(0, self.status.set, status)
+            self.root.after(0, self.status.set, compact_status)
 
     def _show_response(self, answer: str) -> None:
         self.response.configure(state="normal")
@@ -103,13 +106,14 @@ class FridayWindow:
 
     def _on_close(self) -> None:
         self._closing = True
-        self._computer_executor.submit(self._close_computer)
+        self._computer_executor.submit(self._close_resources)
         self._computer_executor.shutdown(wait=False)
         self.root.destroy()
 
-    def _close_computer(self) -> None:
+    def _close_resources(self) -> None:
         if self.core._computer is not None:
             self.core._computer.browser.close()
+        self.core.close()
 
     def _show_error(self, message: str) -> None:
         self.response.configure(state="normal")

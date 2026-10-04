@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from friday.brain import LOG_PATH, LocalQwenBrain
+from friday.brain import LOG_PATH
+from friday.brain_manager import BrainManager
 from friday.conversation import ConversationHistory
 from friday.profile import AssistantProfile
 from friday.router import RoutingDecision, Router, create_router
@@ -17,10 +18,10 @@ class FridayCore:
         self,
         profile: AssistantProfile,
         router: Router | None = None,
-        brain: LocalQwenBrain | None = None,
+        brain_manager: BrainManager | None = None,
     ) -> None:
         self._router = router if router is not None else create_router()
-        self._brain = brain if brain is not None else LocalQwenBrain(profile)
+        self._brain_manager = brain_manager or BrainManager(profile)
         self._history = ConversationHistory(max_turns=6)
         self._computer: ComputerController | None = None
         self.pending_approval: str | None = None
@@ -42,14 +43,15 @@ class FridayCore:
             self.pending_approval = command if risk == Risk.CONFIRM else None
             return answer, None, decision
 
-        answer, prompt_tokens, completion_tokens = self._brain.respond(command, self._history.messages())
+        reply = self._brain_manager.respond(command, self._history.messages(), on_status)
+        answer = reply.text
         self._history.add_exchange(command, answer)
         with LOG_PATH.open("a", encoding="utf-8") as log:
             log.write(
-                f"prompt_tokens={prompt_tokens} "
-                f"output_tokens={completion_tokens if completion_tokens is not None else 'unknown'}\n"
+                f"brain={reply.provider} prompt_tokens={reply.prompt_tokens} "
+                f"output_tokens={reply.completion_tokens if reply.completion_tokens is not None else 'unknown'}\n"
             )
-        return answer, prompt_tokens, decision
+        return answer, reply.prompt_tokens, decision
 
     def approve_pending(self, approved: bool) -> str:
         command = self.pending_approval
@@ -62,3 +64,6 @@ class FridayCore:
             raise RuntimeError("Computer controller is unavailable.")
         answer, _ = self._computer.execute_request(command, approved=True)
         return answer
+
+    def close(self) -> None:
+        self._brain_manager.close()

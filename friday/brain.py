@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import time
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -30,52 +26,6 @@ if urlsplit(API_BASE).hostname != "127.0.0.1":
 LOCAL_HTTP = build_opener(ProxyHandler({}))
 
 
-def ensure_model_server() -> None:
-    try:
-        _get_models()
-        return
-    except (OSError, URLError, HTTPError, TimeoutError, json.JSONDecodeError):
-        pass
-
-    if os.name != "nt":
-        raise RuntimeError("The local model is offline; the supplied launcher requires Windows.")
-    if not LAUNCHER_PATH.is_file():
-        raise RuntimeError(f"Local model launcher was not found: {LAUNCHER_PATH}")
-
-    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    with LOG_PATH.open("a", encoding="utf-8") as server_log:
-        subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(LAUNCHER_PATH),
-                "-ContextSize",
-                "4096",
-            ],
-            cwd=PROJECT_ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=server_log,
-            stderr=subprocess.STDOUT,
-            creationflags=creation_flags,
-            close_fds=True,
-        )
-
-    deadline = time.monotonic() + SERVER_START_TIMEOUT_SECONDS
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        time.sleep(1)
-        try:
-            _get_models()
-            return
-        except (OSError, URLError, HTTPError, TimeoutError, json.JSONDecodeError) as error:
-            last_error = error
-    detail = f": {last_error}" if last_error else ""
-    raise RuntimeError(f"llama.cpp did not become ready within five minutes{detail}")
-
-
 def _get_models(timeout: float = 2.0) -> dict[str, Any]:
     request = Request(f"{API_BASE}/models", method="GET")
     with LOCAL_HTTP.open(request, timeout=timeout) as response:
@@ -89,12 +39,16 @@ class LocalQwenBrain:
     def respond(
         self, command: str, history: list[dict[str, str]]
     ) -> tuple[str, int | None, int | None]:
-        ensure_model_server()
-        messages = [
+        return self.chat(self.messages(command, history))
+
+    def messages(self, command: str, history: list[dict[str, str]]) -> list[dict[str, str]]:
+        return [
             {"role": "system", "content": self._system_prompt},
             *history,
             {"role": "user", "content": command},
         ]
+
+    def chat(self, messages: list[dict[str, str]]) -> tuple[str, int | None, int | None]:
         request_body = {
             "model": MODEL_NAME,
             "messages": messages,
@@ -118,7 +72,5 @@ class LocalQwenBrain:
 
         usage = payload.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-        completion_tokens = (
-            usage.get("completion_tokens") if isinstance(usage, dict) else None
-        )
+        completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
         return answer, prompt_tokens, completion_tokens
