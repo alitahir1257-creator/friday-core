@@ -12,7 +12,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from friday.brain import LAUNCHER_PATH, LOG_PATH, SERVER_START_TIMEOUT_SECONDS, _get_models
+from friday.brain import (
+    LAUNCHER_PATH,
+    LOCAL_BRAIN_HOST,
+    LOCAL_BRAIN_PORT,
+    LOG_PATH,
+    SERVER_START_TIMEOUT_SECONDS,
+    _get_models,
+)
 
 
 class LocalBrainState(str, Enum):
@@ -24,7 +31,7 @@ class LocalBrainState(str, Enum):
 
 
 class LocalBrainLifecycleManager:
-    """Only stop a server started through this manager's retained launcher PID."""
+    """Only stop the llama.cpp process launched and retained by this manager."""
 
     def __init__(self, idle_seconds: int | None = None, startup_timeout: int = SERVER_START_TIMEOUT_SECONDS) -> None:
         try:
@@ -72,10 +79,10 @@ class LocalBrainLifecycleManager:
                 deadline = time.monotonic() + self.startup_timeout
                 while time.monotonic() < deadline:
                     if self._launcher is None or self._launcher.poll() is not None:
-                        raise RuntimeError("The FRIDAY local brain launcher exited before the server became ready.")
+                        raise RuntimeError("The FRIDAY local brain process exited before the server became ready.")
                     if self.health():
                         server_pid = self._find_owned_server(self._launcher.pid)
-                        if server_pid is None:
+                        if server_pid != self._launcher.pid:
                             raise RuntimeError("The local server became ready, but FRIDAY could not verify ownership.")
                         self._server_pid = server_pid
                         self._last_used = time.monotonic()
@@ -115,11 +122,26 @@ class LocalBrainLifecycleManager:
         launcher_text = LAUNCHER_PATH.read_text(encoding="utf-8-sig")
         self._server_executable = self._launcher_value(launcher_text, "server")
         self._model_path = self._launcher_value(launcher_text, "model")
-        powershell = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+        if not Path(self._server_executable).is_file() or not Path(self._model_path).is_file():
+            raise RuntimeError("The configured local Qwen executable or model was not found.")
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         with LOG_PATH.open("ab") as server_log:
             self._launcher = subprocess.Popen(
-                [str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(LAUNCHER_PATH), "-ContextSize", "4096"],
+                [
+                    self._server_executable,
+                    "--model", self._model_path,
+                    "--alias", "Qwen3.5-4B",
+                    "--host", LOCAL_BRAIN_HOST,
+                    "--port", str(LOCAL_BRAIN_PORT),
+                    "--ctx-size", "4096",
+                    "--threads", "4",
+                    "--parallel", "1",
+                    "--n-gpu-layers", "0",
+                    "--jinja",
+                    "--reasoning", "off",
+                    "--cors-origins", "localhost",
+                    "--no-webui",
+                ],
                 cwd=LAUNCHER_PATH.parent,
                 stdin=subprocess.DEVNULL,
                 stdout=server_log,
@@ -130,26 +152,36 @@ class LocalBrainLifecycleManager:
 
     def _find_owned_server(self, launcher_pid: int) -> int | None:
         script = (
-            f"$rows=@(Get-CimInstance Win32_Process -Filter \"ParentProcessId={int(launcher_pid)}\" | "
-            "Where-Object { $_.Name -eq 'llama-server.exe' -and $_.CommandLine -like '*--host 127.0.0.1*' -and $_.CommandLine -like '*--port 8080*' } | "
-            "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine); $rows | ConvertTo-Json -Compress"
+            f"$p=Get-CimInstance Win32_Process -Filter \"ProcessId={int(launcher_pid)}\"; "
+            "if ($p) { $p | Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress }"
         )
         completed = subprocess.run(
-            [str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-Command", script],
+            [
+                str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"),
+                "-NoProfile",
+                "-Command",
+                script,
+            ],
             capture_output=True, text=True, timeout=10, check=True,
         )
-        rows: Any = json.loads(completed.stdout or "[]")
-        rows = rows if isinstance(rows, list) else ([rows] if rows else [])
-        matches = [
-            row for row in rows
-            if int(row.get("ParentProcessId", -1)) == launcher_pid
+        row: Any = json.loads(completed.stdout or "null")
+        if not isinstance(row, dict):
+            return None
+        command_line = row.get("CommandLine", "")
+        expected_port = re.compile(rf"--port\s+{LOCAL_BRAIN_PORT}(?:\s|$)", re.IGNORECASE)
+        expected_host = re.compile(r"--host\s+127\.0\.0\.1(?:\s|$)", re.IGNORECASE)
+        if (
+            int(row.get("ProcessId", -1)) == launcher_pid
             and row.get("Name", "").casefold() == "llama-server.exe"
             and self._server_executable
             and os.path.normcase(row.get("ExecutablePath", "")) == os.path.normcase(self._server_executable)
             and self._model_path
-            and self._model_path.casefold() in row.get("CommandLine", "").casefold()
-        ]
-        return int(matches[0]["ProcessId"]) if len(matches) == 1 else None
+            and self._model_path.casefold() in command_line.casefold()
+            and expected_host.search(command_line)
+            and expected_port.search(command_line)
+        ):
+            return launcher_pid
+        return None
 
     @staticmethod
     def _launcher_value(script: str, variable: str) -> str:
@@ -190,13 +222,10 @@ class LocalBrainLifecycleManager:
         launcher, server_pid = self._launcher, self._server_pid
         if launcher is None:
             return
-        if server_pid is None and launcher.poll() is None:
-            server_pid = self._find_owned_server(launcher.pid)
-        if server_pid is not None:
-            # Revalidate the PID's parent, executable, and endpoint before stopping it.
-            self._stop_verified_server(launcher.pid, server_pid)
+        if server_pid is not None and server_pid != launcher.pid:
+            raise RuntimeError("The retained local brain process identity changed; it was not stopped.")
         if launcher.poll() is None:
-            # This is the PowerShell process created by _launch, not a name-based search.
+            # Popen retains a handle to the exact process started by FRIDAY.
             launcher.terminate()
         try:
             launcher.wait(timeout=10)
@@ -205,25 +234,6 @@ class LocalBrainLifecycleManager:
             launcher.wait(timeout=5)
         self._launcher = None
         self._server_pid = None
-
-    def _stop_verified_server(self, launcher_pid: int, server_pid: int) -> None:
-        script = (
-            f"$p=Get-CimInstance Win32_Process -Filter \"ProcessId={int(server_pid)}\"; "
-            "if (-not $p) { exit 0 } "
-            f"elseif ($p.ParentProcessId -eq {int(launcher_pid)} -and $p.Name -eq 'llama-server.exe' "
-            f"-and $p.ExecutablePath -ieq '{self._powershell_literal(self._server_executable or '')}' "
-            f"-and $p.CommandLine.IndexOf('{self._powershell_literal(self._model_path or '')}', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 "
-            "-and $p.CommandLine -like '*--host 127.0.0.1*' -and $p.CommandLine -like '*--port 8080*') { "
-            f"Stop-Process -Id {int(server_pid)} -Force; exit 0 }} else {{ exit 5 }}"
-        )
-        subprocess.run(
-            [str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"), "-NoProfile", "-Command", script],
-            capture_output=True, text=True, timeout=15, check=True,
-        )
-
-    @staticmethod
-    def _powershell_literal(value: str) -> str:
-        return value.replace("'", "''")
 
     def close(self) -> None:
         """Close only a local process owned by this manager."""

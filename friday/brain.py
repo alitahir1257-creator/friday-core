@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -14,7 +15,14 @@ from friday.profile import AssistantProfile
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = PROJECT_ROOT / "friday-core.log"
 LAUNCHER_PATH = Path(r"D:\FRIDAY\scripts\friday-local-brain.ps1")
-API_BASE = "http://127.0.0.1:8080/v1"
+LOCAL_BRAIN_HOST = "127.0.0.1"
+try:
+    LOCAL_BRAIN_PORT = int(os.environ.get("FRIDAY_LOCAL_BRAIN_PORT", "8080"))
+except ValueError as error:
+    raise RuntimeError("FRIDAY_LOCAL_BRAIN_PORT must be an integer from 1 to 65535.") from error
+if not 1 <= LOCAL_BRAIN_PORT <= 65535:
+    raise RuntimeError("FRIDAY_LOCAL_BRAIN_PORT must be an integer from 1 to 65535.")
+API_BASE = f"http://{LOCAL_BRAIN_HOST}:{LOCAL_BRAIN_PORT}/v1"
 MODEL_NAME = "Qwen3.5-4B"
 MAX_OUTPUT_TOKENS = 1024
 SERVER_START_TIMEOUT_SECONDS = 300
