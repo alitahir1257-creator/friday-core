@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import (
+    HTTPRedirectHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 from friday.brain import LOG_PATH, MAX_OUTPUT_TOKENS, LocalQwenBrain
 from friday.lifecycle import LocalBrainLifecycleManager
@@ -19,6 +28,13 @@ CLOUDFLARE_DEFAULT_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 CLOUDFLARE_TIMEOUT_SECONDS = 30
 ACCOUNT_ID_RE = re.compile(r"^[a-fA-F0-9]{32}$")
 MODEL_RE = re.compile(r"^@cf/[A-Za-z0-9._/-]+$")
+FREELLMAPI_DEFAULT_ENABLED = False
+FREELLMAPI_DEFAULT_BASE_URL = "http://127.0.0.1:3001/v1"
+FREELLMAPI_DEFAULT_MODEL = "auto"
+FREELLMAPI_DEFAULT_TIMEOUT_SECONDS = 15.0
+FREELLMAPI_MAX_TIMEOUT_SECONDS = 60.0
+FREELLMAPI_MAX_RESPONSE_BYTES = 1024 * 1024
+FREELLMAPI_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -27,6 +43,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 CLOUDFLARE_HTTP = build_opener(_NoRedirect())
+FREELLMAPI_HTTP = build_opener(ProxyHandler({}), _NoRedirect())
 
 
 @dataclass(frozen=True)
@@ -97,6 +114,124 @@ class CloudflareQwenProvider:
         return _reply_from_payload(payload, self.name)
 
 
+class FreeLLMAPIProvider:
+    """Optional OpenAI-compatible client for a user-managed FreeLLMAPI gateway."""
+
+    # Wire contract: https://github.com/tashfeenahmed/freellmapi/blob/main/docs/en/api/01-rest-api.md#chat-completions
+
+    name = "freellmapi"
+    is_local = False
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = FREELLMAPI_DEFAULT_ENABLED,
+        base_url: str = FREELLMAPI_DEFAULT_BASE_URL,
+        api_key: str = "",
+        model: str = FREELLMAPI_DEFAULT_MODEL,
+        timeout_seconds: float = FREELLMAPI_DEFAULT_TIMEOUT_SECONDS,
+        opener: OpenerDirector | None = None,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.base_url = ""
+        self._api_key = ""
+        self.model = ""
+        self.timeout_seconds = FREELLMAPI_DEFAULT_TIMEOUT_SECONDS
+        self._configuration_error = False
+        self._status = "disabled" if not self.enabled else "unconfigured"
+        self._http = opener or FREELLMAPI_HTTP
+
+        endpoint = _validate_freellmapi_base_url(base_url)
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = math.nan
+        normalized_model = model.strip()
+        token = api_key.strip()
+
+        if (
+            endpoint is None
+            or not math.isfinite(timeout)
+            or not 0.1 <= timeout <= FREELLMAPI_MAX_TIMEOUT_SECONDS
+            or not FREELLMAPI_MODEL_RE.fullmatch(normalized_model)
+            or len(token) > 4096
+            or any(ord(char) < 33 or ord(char) > 126 for char in token)
+        ):
+            self._configuration_error = True
+            self._status = "invalid_configuration" if self.enabled else "disabled"
+            return
+
+        self.base_url = endpoint
+        self.model = normalized_model
+        self.timeout_seconds = timeout
+        if not self.enabled:
+            self._status = "disabled"
+            return
+        if not token:
+            self._status = "unconfigured"
+            return
+
+        self._api_key = token
+        self._status = "configured"
+
+    @classmethod
+    def from_environment(
+        cls, environ: Mapping[str, str] | None = None
+    ) -> FreeLLMAPIProvider:
+        values = os.environ if environ is None else environ
+        raw_enabled = values.get("FRIDAY_FREELLMAPI_ENABLED", "false").strip().casefold()
+        enabled = raw_enabled in {"1", "true", "yes", "on"}
+        return cls(
+            enabled=enabled,
+            base_url=values.get("FRIDAY_FREELLMAPI_BASE_URL", FREELLMAPI_DEFAULT_BASE_URL),
+            api_key=values.get("FRIDAY_FREELLMAPI_API_KEY", ""),
+            model=values.get("FRIDAY_FREELLMAPI_MODEL", FREELLMAPI_DEFAULT_MODEL),
+            timeout_seconds=values.get(
+                "FRIDAY_FREELLMAPI_TIMEOUT_SECONDS",
+                FREELLMAPI_DEFAULT_TIMEOUT_SECONDS,
+            ),
+        )
+
+    def available(self) -> bool:
+        return self.enabled and not self._configuration_error and bool(self._api_key)
+
+    def health(self) -> str:
+        # Avoid a network probe: the first opted-in user chat establishes availability.
+        return self._status.upper()
+
+    def chat(self, messages: list[dict[str, str]]) -> BrainReply:
+        if not self.available():
+            raise RuntimeError("FreeLLMAPI is not configured.")
+
+        body = json.dumps(
+            {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "temperature": 0.3,
+                "stream": False,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = Request(
+            f"{self.base_url}/chat/completions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with self._http.open(request, timeout=self.timeout_seconds) as response:
+            raw = response.read(FREELLMAPI_MAX_RESPONSE_BYTES + 1)
+        if len(raw) > FREELLMAPI_MAX_RESPONSE_BYTES:
+            raise RuntimeError("FreeLLMAPI returned an oversized response.")
+        payload = json.loads(raw.decode("utf-8"))
+        return _reply_from_payload(payload, self.name)
+
+
 class LocalQwenProvider:
     name = "local"
     is_local = True
@@ -131,10 +266,12 @@ class BrainManager:
         profile: AssistantProfile,
         local_provider: LocalQwenProvider | None = None,
         cloud_provider: CloudflareQwenProvider | None = None,
+        freellmapi_provider: FreeLLMAPIProvider | None = None,
     ) -> None:
         self.cloud_enabled = profile.cloud_brain_enabled
         self.local = local_provider or LocalQwenProvider(profile)
         self.cloud = cloud_provider or CloudflareQwenProvider()
+        self.freellmapi = freellmapi_provider or FreeLLMAPIProvider.from_environment()
 
     def respond(
         self,
@@ -143,10 +280,10 @@ class BrainManager:
         on_status: Callable[[str], None] | None = None,
     ) -> BrainReply:
         messages = self.local.brain.messages(command, history)
-        cloud_attempted = False
+        remote_attempted = False
         if self.cloud_enabled and self.cloud.available():
             try:
-                cloud_attempted = True
+                remote_attempted = True
                 if on_status:
                     on_status("THINKING_CLOUD")
                 reply = self.cloud.chat(messages)
@@ -157,11 +294,26 @@ class BrainManager:
                 suffix = f" http_status={http_status}" if http_status else ""
                 _log_provider(f"brain=cloudflare-failed error={type(error).__name__}{suffix}")
 
+        if self.freellmapi.available():
+            try:
+                remote_attempted = True
+                if on_status:
+                    on_status("THINKING_CLOUD")
+                reply = self.freellmapi.chat(messages)
+                _log_provider("brain=freellmapi")
+                return reply
+            except Exception as error:
+                http_status = error.code if isinstance(error, HTTPError) else ""
+                suffix = f" http_status={http_status}" if http_status else ""
+                _log_provider(
+                    f"brain=freellmapi-failed error={type(error).__name__}{suffix}"
+                )
+
         if on_status:
             next_state = "THINKING_LOCAL" if self.local.lifecycle.health() else "STARTING_LOCAL_BRAIN"
             on_status(next_state)
         reply = self.local.chat(messages)
-        _log_provider("brain=local-fallback" if cloud_attempted else "brain=local")
+        _log_provider("brain=local-fallback" if remote_attempted else "brain=local")
         return reply
 
     def close(self) -> None:
@@ -172,9 +324,12 @@ def _reply_from_payload(payload: object, provider: str) -> BrainReply:
     if not isinstance(payload, dict):
         raise RuntimeError("The brain provider returned an invalid response.")
     try:
-        text = payload["choices"][0]["message"]["content"].strip()
+        text = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError, AttributeError) as error:
         raise RuntimeError("The brain provider returned no assistant response.") from error
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("The brain provider returned no assistant response.")
+    text = text.strip()
     usage = payload.get("usage", {})
     if not isinstance(usage, dict):
         usage = {}
@@ -185,3 +340,36 @@ def _log_provider(message: str) -> None:
     # Keep logs to provider/status metadata; never write prompts, response text, or credentials.
     with LOG_PATH.open("a", encoding="utf-8") as log:
         log.write(message + "\n")
+
+
+def _validate_freellmapi_base_url(value: str) -> str | None:
+    if not value or len(value) > 2048 or value != value.strip():
+        return None
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1"):
+        return None
+    if parsed.scheme == "http":
+        if hostname.casefold() != "localhost":
+            try:
+                if not ipaddress.ip_address(hostname).is_loopback:
+                    return None
+            except ValueError:
+                return None
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parsed.scheme, netloc, path, "", ""))

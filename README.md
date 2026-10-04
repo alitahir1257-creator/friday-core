@@ -26,6 +26,20 @@ Create a Workers AI API token from Cloudflare's Workers AI dashboard. Keep the t
 
 For zero-cost use, keep the Cloudflare account on the Workers Free plan. Cloudflare currently includes 10,000 Workers AI Neurons per day on Free and rejects requests after that allocation is exhausted. Workers Paid can charge for usage above the free allocation, so do not activate it or add payment information. FRIDAY falls back to local Qwen when Cloudflare rejects a request. Check [Workers AI pricing and free allocation](https://developers.cloudflare.com/workers-ai/platform/pricing/) before enabling cloud mode because Cloudflare's limits and prices can change.
 
+### Optional FreeLLMAPI gateway
+
+FreeLLMAPI is an optional downstream gateway behind `BrainManager`; it does not replace FRIDAY's provider selection or local Qwen fallback. When Cloudflare is explicitly enabled, FRIDAY tries it first, then an enabled FreeLLMAPI gateway, then local Qwen. FreeLLMAPI owns its downstream provider catalog, credentials, quotas, and fallback routing. OmniRoute remains planned for Phase 4B as a separate upper-level FRIDAY routing layer.
+
+The gateway is disabled by default. To opt in, set these Windows environment variables and restart FRIDAY:
+
+- `FRIDAY_FREELLMAPI_ENABLED=true`
+- `FRIDAY_FREELLMAPI_BASE_URL` (optional; defaults to `http://127.0.0.1:3001/v1`)
+- `FRIDAY_FREELLMAPI_API_KEY` (the unified gateway key; environment only)
+- `FRIDAY_FREELLMAPI_MODEL` (optional; defaults to the documented `auto` router model)
+- `FRIDAY_FREELLMAPI_TIMEOUT_SECONDS` (optional; defaults to `15`)
+
+FRIDAY makes one non-streaming OpenAI-compatible chat-completions request. A disabled, unconfigured, failed, timed-out, rate-limited, or malformed gateway response falls through to local Qwen. Use FreeLLMAPI's free provider configuration only; do not enable premium features or billing. Keep individual downstream provider keys in FreeLLMAPI, never in FRIDAY. The unified gateway key is never stored in `profile.json` or written to logs.
+
 ## Optional remote Laya System-1
 
 Laya is an optional structured route classifier for genuinely ambiguous requests. It does not answer conversational prompts, execute computer actions, or replace `BrainManager`. Deterministic computer plans and policy-sensitive actions bypass it. On eligible requests, FRIDAY sends only the current command (up to 512 characters) and a compact route-choice question; it does not send conversation history, environment values, or local files. Requests containing credential markers or recognizable token formats are kept local. The footer shows whether remote Laya is disabled, configured, healthy, or unavailable.
