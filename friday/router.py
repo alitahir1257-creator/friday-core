@@ -70,6 +70,14 @@ class BuiltinRouter:
 
     def route(self, command: str) -> RoutingDecision:
         normalized = command.casefold()
+        # Computer commands are planned only when relevant; GENERAL stays small.
+        from friday.capabilities.computer.parser import DeterministicComputerPlanner
+        from friday.capabilities.computer.policy import ApprovalPolicy
+        from friday.capabilities.registry import Risk
+
+        if (DeterministicComputerPlanner().plan(command) is not None
+                or ApprovalPolicy().classify_request(command) in {Risk.BLOCKED, Risk.CONFIRM}):
+            return RoutingDecision(Route.COMPUTER, 0.95, "deterministic computer command or safety policy")
         for route, terms in self._route_terms:
             for term in terms:
                 if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized):

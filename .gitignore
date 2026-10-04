@@ -2,3 +2,4 @@
 *.py[cod]
 friday-core.log
 .venv/
+.browser-profile/

@@ -1,0 +1,1 @@
+"""Structured, replaceable FRIDAY capabilities."""
