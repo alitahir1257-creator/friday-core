@@ -1,0 +1,1 @@
+"""Lightweight FRIDAY Core package."""
