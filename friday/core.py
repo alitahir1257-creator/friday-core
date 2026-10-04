@@ -9,6 +9,7 @@ from friday.laya_client import RemoteLayaClient
 from friday.profile import AssistantProfile
 from friday.router import RoutingDecision, Router, create_router
 from friday.router import Route
+from friday.system_one import HostedJevProvider, RemoteLayaProvider, SystemOneManager
 from friday.capabilities.registry import Risk
 from friday.capabilities.computer.controller import ComputerController
 from typing import Callable
@@ -21,10 +22,15 @@ class FridayCore:
         router: Router | None = None,
         brain_manager: BrainManager | None = None,
         laya_client: RemoteLayaClient | None = None,
+        systemone_manager: SystemOneManager | None = None,
     ) -> None:
         self._router = router if router is not None else create_router()
         self._brain_manager = brain_manager or BrainManager(profile)
         self._laya_client = laya_client or RemoteLayaClient.from_profile(profile.laya_enabled)
+        self._systemone_manager = systemone_manager or SystemOneManager(
+            laya_provider=RemoteLayaProvider(self._laya_client),
+            jev_provider=HostedJevProvider.from_environment(),
+        )
         self._history = ConversationHistory(max_turns=6)
         self._computer: ComputerController | None = None
         self.pending_approval: str | None = None
@@ -34,18 +40,23 @@ class FridayCore:
         """Return a secret-free readiness state for the optional remote classifier."""
         return self._laya_client.status
 
+    @property
+    def systemone_status(self) -> str:
+        """Return safe status metadata for whichever typed decision providers are configured."""
+        return self._systemone_manager.status
+
     def respond(self, command: str, on_status: Callable[[str], None] | None = None) -> tuple[str, int | None, RoutingDecision]:
         decision = self._router.route(command)
         ambiguity = getattr(self._router, "ambiguous_routes", None)
         candidates = ambiguity(command) if callable(ambiguity) else None
         if candidates:
-            remote_decision = self._laya_client.classify_route(command, candidates)
+            remote_decision = self._systemone_manager.classify_route(command, candidates)
             if remote_decision is not None:
                 decision = RoutingDecision(
                     route=remote_decision.route,
                     confidence=remote_decision.probability,
-                    reason="remote System-1 route hint accepted",
-                    source="laya",
+                    reason="System-One route hint accepted",
+                    source=remote_decision.provider,
                 )
         with LOG_PATH.open("a", encoding="utf-8") as log:
             log.write(

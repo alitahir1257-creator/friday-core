@@ -6,39 +6,30 @@ import ipaddress
 import json
 import math
 import os
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener
 
 from friday.router import Route
+from friday.system_one_contract import (
+    ENV_VALUE_ASSIGNMENT,
+    MAX_RESPONSE_BYTES,
+    MAX_STATE_CHARACTERS,
+    MIN_ROUTE_PROBABILITY,
+    ROUTE_CRITERIA,
+    SECRET_SHAPE,
+    SENSITIVE_MARKER,
+    RouteChoice,
+    build_route_question,
+    parse_route_answer as _parse_systemone_route_answer,
+    route_state_status,
+)
 
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 MAX_TIMEOUT_SECONDS = 30.0
-MAX_STATE_CHARACTERS = 512
-MAX_RESPONSE_BYTES = 64 * 1024
-MIN_ROUTE_PROBABILITY = 0.5
-ROUTE_CRITERIA = {
-    Route.GENERAL: "ordinary conversation, explanation, or questions",
-    Route.CODING: "software development, code, debugging, or technical implementation",
-    Route.RESEARCH: "investigation, evidence gathering, comparison, or current information",
-    Route.COMPUTER: "a request to control the user's computer or applications",
-    Route.MEMORY: "a request to remember or recall user-provided information",
-}
-SENSITIVE_MARKER = re.compile(
-    r"\b(?:password|passwd|passphrase|api[ _-]?key|secret|token|authorization|bearer|credential|"
-    r"client[_ -]?secret|private[_ -]?key|access[_ -]?key|refresh[_ -]?token|cookie|session[_ -]?id)\b",
-    re.IGNORECASE,
-)
-ENV_VALUE_ASSIGNMENT = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\s*=\s*\S+", re.ASCII)
-SECRET_SHAPE = re.compile(
-    r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
-    r"[A-Za-z0-9_-]{40,})\b"
-)
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
 
@@ -55,6 +46,7 @@ HTTP = build_opener(_NoRedirect())
 class LayaRouteDecision:
     route: Route
     probability: float
+    confidence: float | None = field(default=None, compare=False)
 
 
 class RemoteLayaClient:
@@ -155,14 +147,11 @@ class RemoteLayaClient:
     ) -> LayaRouteDecision | None:
         if not self.available:
             return None
-        if not isinstance(command, str) or not command.strip() or len(command) > MAX_STATE_CHARACTERS:
+        state_status = route_state_status(command)
+        if state_status == "unsafe_or_oversized":
             self._status = "skipped_unsafe_or_oversized_state"
             return None
-        if (
-            SENSITIVE_MARKER.search(command)
-            or ENV_VALUE_ASSIGNMENT.search(command)
-            or SECRET_SHAPE.search(command)
-        ):
+        if state_status == "sensitive":
             self._status = "skipped_sensitive_state"
             return None
 
@@ -170,20 +159,7 @@ class RemoteLayaClient:
         if len(options) < 2 or any(not isinstance(route, Route) for route in options):
             self._status = "invalid_request"
             return None
-        criteria = {route.value: ROUTE_CRITERIA[route] for route in options}
-        body = {
-            "state": command.strip(),
-            "questions": {
-                "route": {
-                    "type": "choice",
-                    "instructions": (
-                        "Choose the best FRIDAY processing category for this request. "
-                        "This is only a routing hint; do not execute actions."
-                    ),
-                    "criteria": criteria,
-                }
-            },
-        }
+        body = build_route_question(command, options)
         try:
             payload = self._request("POST", "/v1/systemone", body)
         except (HTTPError, URLError, TimeoutError, OSError):
@@ -256,47 +232,10 @@ def _parse_bool(value: str) -> bool | None:
     return None
 
 
-def _parse_route_answer(payload: Any, candidates: tuple[Route, ...]) -> LayaRouteDecision | None:
-    if not isinstance(payload, dict):
+def _parse_route_answer(
+    payload: Any, candidates: tuple[Route, ...]
+) -> LayaRouteDecision | None:
+    choice = _parse_systemone_route_answer(payload, candidates)
+    if not isinstance(choice, RouteChoice):
         return None
-    answers = payload.get("answers")
-    if not isinstance(answers, dict):
-        return None
-    answer = answers.get("route")
-    if not isinstance(answer, dict) or answer.get("type") != "choice":
-        return None
-    choice = answer.get("choice")
-    if not isinstance(choice, str):
-        return None
-    try:
-        route = Route(choice)
-    except ValueError:
-        return None
-    if route not in candidates:
-        return None
-
-    probabilities = answer.get("probabilities")
-    if not isinstance(probabilities, dict):
-        return None
-    probability = probabilities.get(choice)
-    if isinstance(probability, bool) or not isinstance(probability, (float, int)):
-        return None
-    try:
-        probability = float(probability)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    confidence = answer.get("confidence")
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        return None
-    try:
-        confidence_value = float(confidence)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    if (
-        not math.isfinite(probability)
-        or not 0.0 <= probability <= 1.0
-        or not math.isfinite(confidence_value)
-        or not 0.0 <= confidence_value <= 1.0
-    ):
-        return None
-    return LayaRouteDecision(route=route, probability=probability)
+    return LayaRouteDecision(choice.route, choice.probability, choice.confidence)
