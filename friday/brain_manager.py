@@ -22,6 +22,7 @@ from urllib.request import (
 
 from friday.brain import LOG_PATH, MAX_OUTPUT_TOKENS, MODEL_NAME, LocalQwenBrain
 from friday.lifecycle import LocalBrainLifecycleManager
+from friday.memory import MemoryManager
 from friday.model_policy import (
     APPROVED_FREE_GEMINI_MODELS,
     ModelPolicy,
@@ -85,6 +86,7 @@ class BrainRequestMetadata:
     trusted_remote_providers: frozenset[str] = frozenset()
     privacy: str | None = None
     task_class: str | None = None
+    memory_namespace: str = "global"
 
     def __post_init__(self) -> None:
         valid = {"public", "private", "local_only"}
@@ -457,6 +459,7 @@ class BrainManager:
         cloud_provider: CloudflareQwenProvider | None = None,
         freellmapi_provider: FreeLLMAPIProvider | None = None,
         omniroute_provider: OmniRouteProvider | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self.cloud_enabled = profile.cloud_brain_enabled
         self.local = local_provider or LocalQwenProvider(profile)
@@ -464,6 +467,11 @@ class BrainManager:
         self.freellmapi = freellmapi_provider or FreeLLMAPIProvider.from_environment()
         self.omniroute = omniroute_provider or OmniRouteProvider.from_environment()
         self.policy_engine = ModelPolicyEngine()
+        try:
+            self.memory = memory_manager if memory_manager is not None else MemoryManager()
+        except Exception as error:
+            self.memory = None
+            self._log_memory_event(f"memory_unavailable error={type(error).__name__}")
 
     def respond(
         self,
@@ -515,6 +523,18 @@ class BrainManager:
         targets = selection.targets
         if selection.privacy in {PrivacyLevel.PRIVATE, PrivacyLevel.LOCAL_ONLY}:
             targets = (ModelTarget("local", self.local_model),)
+        if self.memory is not None:
+            try:
+                memory_context = self.memory.build_context(
+                    command,
+                    namespace=metadata.memory_namespace,
+                    privacy_level=selection.privacy.value,
+                    route_backend=selection.preferred_backend,
+                )
+                if memory_context.text:
+                    messages.insert(1, {"role": "system", "content": memory_context.text})
+            except Exception as error:
+                self._log_memory_event(f"memory_retrieval_failed error={type(error).__name__}")
 
         started = time.perf_counter()
         fallback_count = 0
@@ -619,6 +639,19 @@ class BrainManager:
 
     def close(self) -> None:
         self.local.close()
+        if self.memory is not None:
+            try:
+                self.memory.close()
+            except Exception as error:
+                self._log_memory_event(f"memory_close_failed error={type(error).__name__}")
+
+    @staticmethod
+    def _log_memory_event(message: str) -> None:
+        try:
+            _log_provider(message)
+        except Exception:
+            # Persistent memory is optional; a filesystem logging failure must not break chat.
+            pass
 
 
 def _reply_from_payload(payload: object, provider: str) -> BrainReply:

@@ -3,3 +3,4 @@
 friday-core.log
 .venv/
 .browser-profile/
+*.sqlite3*
