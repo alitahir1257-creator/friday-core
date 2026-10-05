@@ -6,6 +6,8 @@ from pathlib import Path
 FRIDAY_ROOT = Path(r"D:\FRIDAY")
 DATA_ROOT = FRIDAY_ROOT / "data"
 MEMORY_DB_PATH = DATA_ROOT / "memory" / "friday-memory.sqlite3"
+AUTOMATIONS_PATH = DATA_ROOT / "automations"
+AUTOMATION_DB_PATH = AUTOMATIONS_PATH / "friday-automations.sqlite3"
 LOGS_PATH = DATA_ROOT / "logs"
 CACHE_PATH = DATA_ROOT / "cache"
 VAULT_PATH = FRIDAY_ROOT / "vault"

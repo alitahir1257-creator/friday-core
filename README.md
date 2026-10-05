@@ -138,3 +138,31 @@ Workers invoke tools only through `ToolRegistry` and its `ApprovalPolicy`; recei
 Scheduling/background automation is Phase 6C, voice conversation is Phase 9A, and the HUD is Phase 10A. Run offline Phase 6B checks with `python -B scripts/phase6b_smoke.py`; its harmless MCP check uses the existing local stdio test server and makes no external network calls.
 
 Run the offline Phase 6A acceptance and Phase 5 regressions with `python -B scripts/phase6a_smoke.py` from the project root. Its MCP server is test-only and communicates over local stdio.
+
+## Local automations (Phase 6C)
+
+`AutomationManager` stores automation definitions and compact run receipts in SQLite at
+`D:\FRIDAY\data\automations\friday-automations.sqlite3`. Set
+`FRIDAY_AUTOMATION_DB_PATH` to override the database path. The store initializes
+idempotently and keeps timestamps timezone-aware.
+
+An explicit in-process `tick()` checks one-time, interval, daily, weekly, and
+local event triggers. Missed recurring intervals coalesce into at most one run;
+event and timed occurrences have persistent duplicate protection. There is no
+Windows service or automatic startup integration yet; Phase 10B owns that work.
+Event providers are local and deterministic; internet monitoring is not included.
+
+Execution follows `AutomationManager -> Scheduler -> AutomationRunner -> Planner /
+WorkerExecutor -> ToolRegistry -> ApprovalPolicy`. A single deterministic
+computer action may use FRIDAY's existing direct dispatcher, which still uses
+ToolRegistry and ApprovalPolicy. Private and local-only plans use the PRIVATE
+BrainManager route; private prompt text and tool arguments are not copied into
+run history. Consequential and destructive actions wait for explicit approval,
+which expires after 24 hours by default. Routine failures do not trigger an
+automation retry or replay storm. The bounded queue dispatches work sequentially.
+
+The manager exposes list/get, pause/resume, disable/archive, edit, next-run
+inspection, `run_now`, approval, history, and cancellation methods for later
+conversation and voice controls. Voice integration is deferred to Phase 9A.
+Automation history is operational SQLite data and is not written to the
+Obsidian-compatible Knowledge Vault or long-term memory.

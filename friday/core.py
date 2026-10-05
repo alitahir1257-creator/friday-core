@@ -305,6 +305,18 @@ class FridayCore:
         self.current_task_run = self.worker_executor.current_task
         return cancelled
 
+    def dispatch_automation_computer(self, goal: str, privacy: str, *, approved: bool | None = None) -> ToolResult | None:
+        """Run a single deterministic COMPUTER action through ToolRegistry."""
+        plan = self._computer_controller().planner.plan(goal)
+        if plan is None or len(plan.actions) != 1:
+            return None
+        tool_name, arguments = self._computer_tool(goal)
+        return self.tool_registry.execute(
+            tool_name, arguments, caller="friday_automation", privacy=privacy,
+            action_metadata={"route": "COMPUTER", "route_source": "deterministic_automation"},
+            approval_callback=(lambda _request: approved) if approved is not None else None,
+        )
+
     @property
     def current_task_state(self) -> dict | None:
         return self.worker_executor.current_state()
