@@ -22,6 +22,7 @@ from urllib.request import (
 
 from friday.brain import LOG_PATH, MAX_OUTPUT_TOKENS, MODEL_NAME, LocalQwenBrain
 from friday.knowledge import KnowledgeVault
+from friday.knowledge.unified import UnifiedKnowledgeManager
 from friday.lifecycle import LocalBrainLifecycleManager
 from friday.memory import MemoryManager
 from friday.model_policy import (
@@ -462,6 +463,7 @@ class BrainManager:
         omniroute_provider: OmniRouteProvider | None = None,
         memory_manager: MemoryManager | None = None,
         knowledge_vault: KnowledgeVault | None = None,
+        unified_manager: UnifiedKnowledgeManager | None = None,
     ) -> None:
         self.cloud_enabled = profile.cloud_brain_enabled
         self.local = local_provider or LocalQwenProvider(profile)
@@ -479,6 +481,7 @@ class BrainManager:
         except Exception as error:
             self.knowledge = None
             _log_provider(f"knowledge_unavailable error={type(error).__name__}")
+        self.unified = unified_manager if unified_manager is not None else UnifiedKnowledgeManager(self.memory, self.knowledge)
 
     def respond(
         self,
@@ -530,32 +533,21 @@ class BrainManager:
         targets = selection.targets
         if selection.privacy in {PrivacyLevel.PRIVATE, PrivacyLevel.LOCAL_ONLY}:
             targets = (ModelTarget("local", self.local_model),)
-        context_messages: list[dict[str, str]] = []
-        if self.memory is not None:
-            try:
-                memory_context = self.memory.build_context(
-                    command,
-                    namespace=metadata.memory_namespace,
-                    privacy_level=selection.privacy.value,
-                    route_backend=selection.preferred_backend,
+        try:
+            context = self.unified.build_context(
+                command, namespace=metadata.memory_namespace,
+                privacy_level=selection.privacy.value, route_backend=selection.preferred_backend,
+            )
+            if context.privacy not in {"public", "private", "local_only"} or (
+                context.privacy != "public" and (
+                    selection.privacy == PrivacyLevel.PUBLIC or selection.preferred_backend != "local"
                 )
-                if memory_context.text:
-                    context_messages.append({"role": "system", "content": memory_context.text})
-            except Exception as error:
-                self._log_memory_event(f"memory_retrieval_failed error={type(error).__name__}")
-        if self.knowledge is not None:
-            try:
-                knowledge_context = self.knowledge.build_context(
-                    command,
-                    namespace=metadata.memory_namespace,
-                    privacy_level=selection.privacy.value,
-                    route_backend=selection.preferred_backend,
-                )
-                if knowledge_context.text:
-                    context_messages.append({"role": "system", "content": knowledge_context.text})
-            except Exception as error:
-                _log_provider(f"knowledge_retrieval_failed error={type(error).__name__}")
-        messages[1:1] = context_messages
+            ):
+                raise PermissionError("Unified context is not allowed on this route.")
+            if context.text:
+                messages[1:1] = [{"role": "system", "content": context.text}]
+        except Exception as error:
+            _log_provider(f"unified_retrieval_failed error={type(error).__name__}")
 
         started = time.perf_counter()
         fallback_count = 0

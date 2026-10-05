@@ -63,3 +63,40 @@ class KnowledgeWriteRejected(ValueError):
 
 class ConcurrentNoteEditError(RuntimeError):
     """A note changed while FRIDAY was preparing an update."""
+
+
+@dataclass(frozen=True)
+class UnifiedResult:
+    source_type: str
+    source_name: str
+    source_id: str
+    namespace: str
+    title: str
+    snippet: str
+    privacy: str
+    relevance: float
+    confidence: float = 0.8
+    updated_at: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class UnifiedContext:
+    text: str
+    results: tuple[UnifiedResult, ...]
+    privacy: str = "public"
+
+    @property
+    def character_count(self) -> int:
+        return len(self.text)
+
+    @property
+    def approximate_tokens(self) -> int:
+        return (len(self.text) + 3) // 4
+
+    @property
+    def source_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for result in self.results:
+            counts[result.source_type] = counts.get(result.source_type, 0) + 1
+        return counts

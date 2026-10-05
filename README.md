@@ -83,6 +83,29 @@ Obsidian desktop is optional: no account, login, plugin, or Sync is required. To
 
 Reserved future locations are `D:\FRIDAY\data\logs`, `D:\FRIDAY\data\cache`, `D:\FRIDAY\models`, `D:\FRIDAY\runtime`, and `D:\FRIDAY\scripts`; existing runtime assets are not moved there automatically.
 
+## Unified Knowledge (Phase 5C)
+
+`UnifiedKnowledgeManager` merges **Memory + Vault + Connectors** into ranked, deduplicated,
+namespace-aware snippets. SQLite memory and the Markdown vault remain independent sources.
+`BrainManager` consumes one privacy-filtered context; source failures leave other sources available.
+Result provenance and per-source counts are available for a future HUD, while prompts omit internal IDs and paths.
+
+Connectors are opt-in. `LocalFilesConnector` defaults to disabled with no roots. Configure
+explicit absolute `ApprovedRoot(path, namespace="friday", privacy="private")` directories,
+register the enabled connector in `ConnectorRegistry`, and pass that registry to the unified manager.
+Local files are private by default; marking a root public explicitly permits its text in cloud context.
+Private/local-only context requires a PRIVATE/local Qwen route and cannot fall back to remote providers.
+
+Search is on demand: no whole-disk scanning, daemon, embedding model, or persistent connector index.
+Each scan visits at most 5,000 entries and reads at most 256 KiB per supported UTF-8 text file.
+Traversal, symlinks/junctions, overlapping roots, credential names/content, hidden directories,
+dependency directories, `.obsidian`, the real vault, and the operational memory directory are excluded.
+These limits bound ordinary local usage; concurrent hostile filesystem mutation is outside the single-user trust model.
+
+No external connectors are implemented. Future research connectors can declare `search` and `research`
+capabilities using the same result contract. Phase 6A adds Tool Registry/MCP; Phase 7A adds research;
+Phase 7B adds PDF/Office/image parsing. Run `python -B scripts/phase5c_smoke.py` for temporary-only checks.
+
 ## Optional remote Laya System-1
 
 Laya is an optional structured route classifier for genuinely ambiguous requests. It does not answer conversational prompts, execute computer actions, or replace `BrainManager`. Deterministic computer plans and policy-sensitive actions bypass it. On eligible requests, FRIDAY sends only the current command (up to 512 characters) and a compact route-choice question; it does not send conversation history, environment values, or local files. Requests containing credential markers or recognizable token formats are kept local. The footer shows whether remote Laya is disabled, configured, healthy, or unavailable.
