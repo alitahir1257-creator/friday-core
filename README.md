@@ -127,6 +127,14 @@ MCP defaults to no configured servers. Phase 6A supports local stdio only; it do
 
 Read-only and ordinary reversible tools may run under policy. Consequential and destructive tools require explicit approval. Private/local-only invocations cannot use tools configured to transmit data. FRIDAY does not register an unrestricted shell or command-execution tool, and it never bypasses operating-system prompts or provider permissions.
 
-PersonalJarvis is an architecture reference only. OpenHuman is not a runtime or dependency. Planner and worker orchestration remain Phase 6B work; coding handoff metadata does not launch Codex automatically.
+PersonalJarvis is an architecture reference only. OpenHuman is not a runtime or dependency. Phase 6B adds bounded in-memory planning and sequential workers; coding handoff metadata does not launch Codex automatically.
+
+## Bounded Planner and Workers (Phase 6B)
+
+Multi-step requests follow `Planner -> PlanValidator -> WorkerExecutor -> ToolRegistry -> ApprovalPolicy -> ToolResult`. Simple COMPUTER actions and one-call knowledge lookups keep their direct routes. Planning uses the existing BrainManager: public plans request SMART, while private/local-only plans use PRIVATE and local Qwen only.
+
+Workers invoke tools only through `ToolRegistry` and its `ApprovalPolicy`; receipts and task events omit arguments and prompt text. Consequential/destructive steps pause with a four-field approval request. Runs support explicit approval/skip, cooperative cancellation between tool calls, deterministic verification, dry-run, and one validated repair attempt. A run is in-memory and bounded to 8 steps, 12 registry calls, one retry per safe step, and one repair. It never spawns another planner or continues indefinitely; unsupported capabilities become BLOCKED. Coding returns handoff metadata without launching Codex; Research stays unavailable until Phase 7A.
+
+Scheduling/background automation is Phase 6C, voice conversation is Phase 9A, and the HUD is Phase 10A. Run offline Phase 6B checks with `python -B scripts/phase6b_smoke.py`; its harmless MCP check uses the existing local stdio test server and makes no external network calls.
 
 Run the offline Phase 6A acceptance and Phase 5 regressions with `python -B scripts/phase6a_smoke.py` from the project root. Its MCP server is test-only and communicates over local stdio.

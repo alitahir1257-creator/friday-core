@@ -490,6 +490,9 @@ class BrainManager:
         on_status: Callable[[str], None] | None = None,
         request_metadata: BrainRequestMetadata | None = None,
         model_selection: ModelSelection | None = None,
+        *,
+        planning: bool = False,
+        system_instruction: str | None = None,
     ) -> BrainReply:
         metadata = request_metadata or BrainRequestMetadata()
         privacy = self.policy_engine.classify_privacy(command, metadata.effective_privacy)
@@ -510,6 +513,7 @@ class BrainManager:
             privacy=privacy,
             requested_policy=requested_policy,
             cloudflare_enabled=self.cloud_enabled,
+            planning=planning,
         )
 
         if selection.policy == ModelPolicy.COMPUTER:
@@ -530,6 +534,9 @@ class BrainManager:
             raise RuntimeError(f"{selection.policy.value} routing is a placeholder in this phase.")
 
         messages = self.local.brain.messages(command, history)
+        if system_instruction:
+            insertion = 1 if messages and messages[0].get("role") == "system" else 0
+            messages.insert(insertion, {"role": "system", "content": system_instruction})
         targets = selection.targets
         if selection.privacy in {PrivacyLevel.PRIVATE, PrivacyLevel.LOCAL_ONLY}:
             targets = (ModelTarget("local", self.local_model),)

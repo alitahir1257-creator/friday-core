@@ -199,6 +199,7 @@ class ModelPolicyEngine:
         privacy: str | PrivacyLevel | None = None,
         requested_policy: ModelPolicy | str | None = None,
         cloudflare_enabled: bool = False,
+        planning: bool = False,
     ) -> ModelSelection:
         level = self.classify_privacy(command, privacy)
         route = self._route_value(route_hint)
@@ -211,7 +212,7 @@ class ModelPolicyEngine:
         except ValueError as error:
             raise ValueError("requested_policy is not a supported model policy.") from error
 
-        if (
+        if not planning and (
             route == Route.COMPUTER
             or explicit_policy == ModelPolicy.COMPUTER
             or self._is_deterministic_computer(command)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 import time
 
 from friday.brain import LOG_PATH
@@ -17,6 +18,14 @@ from friday.capabilities.computer.controller import ComputerController
 from friday.capabilities.registry import Capability
 from friday.mcp import MCPClientManager
 from friday.model_policy import ModelPolicy, ModelPolicyEngine, ModelSelection, PrivacyLevel
+from friday.planner import (
+    Planner,
+    TaskRun,
+    TaskResult,
+    WorkerExecutor,
+    WorkerProfile,
+    is_multi_step_request,
+)
 from friday.tools.adapters import register_computer_tools, register_knowledge_tools
 from friday.tools.models import ToolResult
 from friday.tools.registry import ToolRegistry
@@ -32,6 +41,8 @@ class FridayCore:
         laya_client: RemoteLayaClient | None = None,
         systemone_manager: SystemOneManager | None = None,
         model_policy_engine: ModelPolicyEngine | None = None,
+        planner: Planner | None = None,
+        worker_executor: WorkerExecutor | None = None,
     ) -> None:
         self._router = router if router is not None else create_router()
         self._brain_manager = brain_manager or BrainManager(profile)
@@ -47,6 +58,12 @@ class FridayCore:
         register_computer_tools(self.tool_registry, self._computer_controller)
         register_knowledge_tools(self.tool_registry, getattr(self._brain_manager, "unified", None))
         self.mcp = MCPClientManager(self.tool_registry)
+        self.planner = planner or Planner(self._brain_manager, self.tool_registry, self._model_policy_engine)
+        self.worker_executor = worker_executor or WorkerExecutor(
+            self.tool_registry, planner=self.planner,
+        )
+        self.current_task_run: TaskRun | None = None
+        self.last_task_result: TaskResult | None = None
         self.last_tool_result: ToolResult | None = None
         self.pending_approval: str | None = None
         self._pending_tool_invocation: tuple[str, dict, str, dict] | None = None
@@ -72,12 +89,101 @@ class FridayCore:
         command: str,
         on_status: Callable[[str], None] | None = None,
         request_metadata: BrainRequestMetadata | None = None,
+        *,
+        dry_run: bool = False,
+        approval_callback: Callable[[Any], str] | None = None,
     ) -> tuple[str, int | None, RoutingDecision]:
         decision = self._router.route(command)
         requested_privacy = (
             request_metadata.effective_privacy if request_metadata is not None else None
         )
         privacy = self._model_policy_engine.classify_privacy(command, requested_privacy)
+
+        selection = self._model_policy_engine.select(
+            command,
+            route_hint=decision.route,
+            privacy=privacy,
+            requested_policy=request_metadata.task_class if request_metadata is not None else None,
+            cloudflare_enabled=bool(getattr(self._brain_manager, "cloud_enabled", False)),
+        )
+        multi_step = is_multi_step_request(command)
+        if decision.route == Route.COMPUTER:
+            deterministic_plan = self._computer_controller().planner.plan(command)
+            multi_step = multi_step or bool(
+                deterministic_plan is not None and len(deterministic_plan.actions) > 1
+            )
+
+        namespace = request_metadata.memory_namespace if request_metadata is not None else "global"
+        if selection.policy == ModelPolicy.CODING:
+            handoff = self.planner.coding_handoff(command, privacy=privacy.value, namespace=namespace)
+            result = self.worker_executor.execute(handoff)
+            self.current_task_run = self.worker_executor.current_task
+            self.last_task_result = result
+            self._last_model_selection = replace(
+                selection, selected_backend="codex", selected_model="codex", latency_ms=0.0,
+            )
+            return "Repository work is assigned to Codex; FRIDAY chat fallback is disabled.", None, decision
+
+        if (
+            selection.policy == ModelPolicy.RESEARCH
+            and not self.tool_registry.find_by_capability("research")
+            and not self._is_knowledge_lookup(command)
+        ):
+            unavailable = self.planner.capability_placeholder(
+                command, capability="research", profile=WorkerProfile.RESEARCH,
+                privacy=privacy.value, namespace=namespace,
+            )
+            result = self.worker_executor.execute(unavailable)
+            self.current_task_run = self.worker_executor.current_task
+            self.last_task_result = result
+            self._last_model_selection = selection
+            return "Research tools are unavailable; web research is planned for Phase 7A.", None, decision
+
+        is_memory_recall = decision.route == Route.MEMORY and not re.search(
+            r"\b(?:remember|yaad\s+rakh)\b", command, re.IGNORECASE,
+        )
+        if (self._is_knowledge_lookup(command) or is_memory_recall) and not multi_step:
+            privacy_value = getattr(privacy, "value", privacy)
+            result = self.tool_registry.execute(
+                "knowledge.search",
+                {"query": command, "namespace": namespace, "privacy": privacy_value, "max_results": 10},
+                caller="friday_core",
+                privacy=privacy_value,
+                action_metadata={"route": decision.route.value, "route_source": decision.source},
+            )
+            self.last_tool_result = result
+            self.pending_approval = command if result.requires_followup else None
+            self._pending_tool_invocation = None
+            self._last_model_selection = replace(
+                selection, selected_backend="tool_registry", selected_model=None, latency_ms=result.duration_ms,
+            )
+            return result.summary, None, decision
+
+        if multi_step or selection.policy == ModelPolicy.RESEARCH:
+            planning_policy = ModelPolicy.PRIVATE if privacy != PrivacyLevel.PUBLIC else ModelPolicy.SMART
+            planning_selection = self._model_policy_engine.select(
+                command,
+                route_hint=Route.GENERAL,
+                privacy=privacy,
+                requested_policy=planning_policy,
+                cloudflare_enabled=bool(getattr(self._brain_manager, "cloud_enabled", False)),
+                planning=True,
+            )
+            plan = self.planner.plan(command, privacy=privacy.value, namespace=namespace)
+            task_result = self.worker_executor.execute(
+                plan, dry_run=dry_run, approval_callback=approval_callback,
+            )
+            self.current_task_run = self.worker_executor.current_task
+            self.last_task_result = task_result
+            last_result = next(
+                (item.tool_result for item in reversed(task_result.step_results) if isinstance(item.tool_result, ToolResult)),
+                None,
+            )
+            if last_result is not None:
+                self.last_tool_result = last_result
+            self._last_model_selection = self.planner.last_selection or planning_selection
+            return task_result.summary, None, decision
+
         ambiguity = getattr(self._router, "ambiguous_routes", None)
         candidates = ambiguity(command) if callable(ambiguity) else None
         if decision.route != Route.COMPUTER and candidates and privacy == PrivacyLevel.PUBLIC:
@@ -183,6 +289,35 @@ class FridayCore:
         )
         self.last_tool_result = result
         return result.summary if approved else "Action cancelled."
+
+    def approve_task(self, task_id: str, answer: str) -> str:
+        result = self.worker_executor.approve(task_id, answer)
+        self.current_task_run = self.worker_executor.current_task
+        return result.summary
+
+    def skip_task_step(self, task_id: str) -> str:
+        result = self.worker_executor.skip(task_id)
+        self.current_task_run = self.worker_executor.current_task
+        return result.summary
+
+    def cancel_task(self, task_id: str | None = None) -> bool:
+        cancelled = self.worker_executor.cancel(task_id)
+        self.current_task_run = self.worker_executor.current_task
+        return cancelled
+
+    @property
+    def current_task_state(self) -> dict | None:
+        return self.worker_executor.current_state()
+
+    @staticmethod
+    def _is_knowledge_lookup(command: str) -> bool:
+        return bool(re.search(
+            r"\b(?:search|find|look up|recall|what did (?:i|we) say|what do i know)\b.{0,100}\b(?:my |our |friday'?s )?"
+            r"(?:memory|knowledge|notes?|vault)\b|"
+            r"\b(?:memory|knowledge|notes?|vault)\b.{0,100}\b(?:search|find|look up|recall)\b",
+            command,
+            re.IGNORECASE,
+        ))
 
     def _computer_controller(self) -> ComputerController:
         if self._computer is None:

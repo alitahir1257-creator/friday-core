@@ -50,6 +50,18 @@ def register_computer_tools(
     ))
 
     registry.register(ToolDefinition(
+        name="type_text", namespace="computer", description="Type literal text into the focused desktop application.",
+        input_schema={"type": "object", "properties": {
+            "text": {"type": "string", "minLength": 1, "maxLength": 10000},
+        }, "required": ["text"], "additionalProperties": False},
+        handler=lambda args, context: run_plan(
+            Action(Capability.INPUT, "TYPE_TEXT", args["text"]), context
+        ),
+        capabilities=frozenset({"computer", "input"}), risk_level=RiskLevel.CONSEQUENTIAL,
+        privacy_support=_PRIVACY, source="native", side_effects="local_input",
+    ))
+
+    registry.register(ToolDefinition(
         name="open_url", namespace="browser", description="Open an HTTP or HTTPS website in the managed browser.",
         input_schema={"type": "object", "properties": {"url": {"type": "string", "minLength": 8, "maxLength": 2048}},
                       "required": ["url"], "additionalProperties": False},
