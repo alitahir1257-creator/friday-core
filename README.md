@@ -119,3 +119,14 @@ The official `laya[serve]` deployment template is isolated in [`deploy/laya`](de
 Hosted Jev is disabled by default. It is used only for ambiguous typed route decisions, after deterministic routing and after configured Remote Laya. When enabled, FRIDAY sends only the current request and the route-choice question to `https://api.typesafe.ai/v1/systemone`; the request includes model `jev-latest` by default. Jev decisions cannot initiate COMPUTER actions. Invalid, low-confidence, timed-out, or failed decisions fall back to the existing deterministic route and `BrainManager`.
 
 Set `FRIDAY_JEV_ENABLED=true` and `FRIDAY_JEV_API_KEY` in the environment to opt in. Optional settings are `FRIDAY_JEV_BASE_URL` (defaults to `https://api.typesafe.ai/v1/systemone`), `FRIDAY_JEV_MODEL` (defaults to `jev-latest`), and `FRIDAY_JEV_TIMEOUT_SECONDS` (defaults to `5`). The API key is never stored in `profile.json` or logged. Hosted Jev sends user text off-device; verify account access and pricing before enabling it. This project does not create an account, configure billing, or assume a free tier. See the [TypeSafe System-One API documentation](https://api.typesafe.ai/redoc).
+# Tool Bus (Phase 6A)
+
+FRIDAY routes tool calls through `ToolRegistry`, `ApprovalPolicy`, native or MCP adapters, `ToolResult`, and a safe in-memory receipt. COMPUTER adapters continue to use the existing deterministic dispatcher; knowledge search uses `UnifiedKnowledgeManager` and its existing privacy filters, provenance, approved roots, and result limits.
+
+MCP defaults to no configured servers. Phase 6A supports local stdio only; it does not enable remote MCP discovery. Each server must be explicitly configured with an executable, separate arguments, an allowed-tool list, blocked tools, environment allowlist, timeout, and any locally reviewed risk mappings. Credentials are referenced by environment-variable name and are passed only when explicitly allowlisted. Tools without a local risk mapping are treated as consequential and require approval. MCP server risk claims are ignored.
+
+Read-only and ordinary reversible tools may run under policy. Consequential and destructive tools require explicit approval. Private/local-only invocations cannot use tools configured to transmit data. FRIDAY does not register an unrestricted shell or command-execution tool, and it never bypasses operating-system prompts or provider permissions.
+
+PersonalJarvis is an architecture reference only. OpenHuman is not a runtime or dependency. Planner and worker orchestration remain Phase 6B work; coding handoff metadata does not launch Codex automatically.
+
+Run the offline Phase 6A acceptance and Phase 5 regressions with `python -B scripts/phase6a_smoke.py` from the project root. Its MCP server is test-only and communicates over local stdio.

@@ -13,9 +13,13 @@ from friday.profile import AssistantProfile
 from friday.router import RoutingDecision, Router, create_router
 from friday.router import Route
 from friday.system_one import HostedJevProvider, RemoteLayaProvider, SystemOneManager
-from friday.capabilities.registry import Risk
 from friday.capabilities.computer.controller import ComputerController
+from friday.capabilities.registry import Capability
+from friday.mcp import MCPClientManager
 from friday.model_policy import ModelPolicy, ModelPolicyEngine, ModelSelection, PrivacyLevel
+from friday.tools.adapters import register_computer_tools, register_knowledge_tools
+from friday.tools.models import ToolResult
+from friday.tools.registry import ToolRegistry
 from typing import Callable
 
 
@@ -39,7 +43,13 @@ class FridayCore:
         self._model_policy_engine = model_policy_engine or ModelPolicyEngine()
         self._history = ConversationHistory(max_turns=6)
         self._computer: ComputerController | None = None
+        self.tool_registry = ToolRegistry()
+        register_computer_tools(self.tool_registry, self._computer_controller)
+        register_knowledge_tools(self.tool_registry, getattr(self._brain_manager, "unified", None))
+        self.mcp = MCPClientManager(self.tool_registry)
+        self.last_tool_result: ToolResult | None = None
         self.pending_approval: str | None = None
+        self._pending_tool_invocation: tuple[str, dict, str, dict] | None = None
         self._last_model_selection: ModelSelection | None = None
 
     @property
@@ -116,16 +126,24 @@ class FridayCore:
             started = time.perf_counter()
             if on_status is not None:
                 on_status("EXECUTING")
-            if self._computer is None:
-                self._computer = ComputerController()
-            answer, risk = self._computer.execute_request(command)
-            self.pending_approval = command if risk == Risk.CONFIRM else None
+            tool_name, arguments = self._computer_tool(command)
+            privacy_value = getattr(selection.privacy, "value", selection.privacy)
+            action_metadata = {"route": decision.route.value, "route_source": decision.source}
+            result = self.tool_registry.execute(
+                tool_name, arguments, caller="friday_core", privacy=privacy_value,
+                action_metadata=action_metadata,
+            )
+            self.last_tool_result = result
+            self.pending_approval = command if result.requires_followup else None
+            self._pending_tool_invocation = (
+                tool_name, arguments, str(privacy_value), action_metadata
+            ) if result.requires_followup else None
             self._last_model_selection = replace(
                 selection,
                 selected_backend="computer",
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
             )
-            return answer, None, decision
+            return result.summary, None, decision
 
         reply = self._brain_manager.respond(
             command,
@@ -150,15 +168,37 @@ class FridayCore:
 
     def approve_pending(self, approved: bool) -> str:
         command = self.pending_approval
+        invocation = self._pending_tool_invocation
         self.pending_approval = None
+        self._pending_tool_invocation = None
         if command is None:
             raise RuntimeError("There is no pending action to approve.")
-        if not approved:
-            return "Action cancelled."
+        if invocation is None:
+            raise RuntimeError("The pending tool invocation is unavailable.")
+        tool_name, arguments, privacy, action_metadata = invocation
+        result = self.tool_registry.execute(
+            tool_name, arguments, caller="friday_core", privacy=privacy,
+            action_metadata=action_metadata,
+            approval_callback=lambda _request: approved,
+        )
+        self.last_tool_result = result
+        return result.summary if approved else "Action cancelled."
+
+    def _computer_controller(self) -> ComputerController:
         if self._computer is None:
-            raise RuntimeError("Computer controller is unavailable.")
-        answer, _ = self._computer.execute_request(command, approved=True)
-        return answer
+            self._computer = ComputerController()
+        return self._computer
+
+    def _computer_tool(self, command: str) -> tuple[str, dict]:
+        plan = self._computer_controller().planner.plan(command)
+        if plan is not None and len(plan.actions) == 1:
+            action = plan.actions[0]
+            if action.capability == Capability.COMPUTER and action.operation.upper() == "OPEN_APP":
+                return "computer.open_app", {"app": action.target}
+            if action.capability == Capability.BROWSER and action.operation.upper() == "NAVIGATE":
+                return "browser.open_url", {"url": action.target}
+        return "computer.dispatch_request", {"request": command}
 
     def close(self) -> None:
+        self.mcp.disconnect_all()
         self._brain_manager.close()
