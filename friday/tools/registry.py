@@ -132,6 +132,7 @@ class ToolRegistry:
         caller: str = "user",
         privacy: str = "public",
         action_metadata: Mapping[str, Any] | None = None,
+        cancellation_check: Callable[[], bool] | None = None,
         approval_callback: Callable[[ToolApprovalRequest], bool] | None = None,
     ) -> ToolResult:
         started = time.perf_counter()
@@ -143,7 +144,7 @@ class ToolRegistry:
             )
 
         try:
-            context = ToolInvocationContext(caller, privacy, False, action_metadata or {})
+            context = ToolInvocationContext(caller, privacy, False, action_metadata or {}, cancellation_check)
         except ValueError as error:
             return self._finish(
                 canonical_name, effective_risk(tool, {}, ToolInvocationContext()), ApprovalDecision.DENY,
@@ -194,7 +195,9 @@ class ToolRegistry:
                     approval_result="DENY", secret_values=_secret_values(arguments),
                 )
             approval_result = "USER_APPROVED"
-            context = ToolInvocationContext(context.caller, context.privacy, True, context.action_metadata)
+            context = ToolInvocationContext(
+                context.caller, context.privacy, True, context.action_metadata, context.cancellation_check,
+            )
             decision = self.approval_policy.decide(tool, arguments, context, risk)
 
         if decision != ApprovalDecision.ALLOW:

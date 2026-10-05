@@ -152,6 +152,30 @@ class Planner:
         if privacy not in {"public", "private", "local_only"}:
             raise ValueError("privacy must be public, private, or local_only.")
         namespace = normalize_namespace(namespace)
+        research_tool = self.tool_registry.get("research.run")
+        if (
+            research_tool is not None
+            and research_tool.enabled
+            and self.policy_engine.requires_research(goal)
+            and not is_multi_step_request(goal)
+        ):
+            privacy_policy = ModelPolicy.PRIVATE if privacy != "public" else ModelPolicy.RESEARCH
+            self.last_selection = self.policy_engine.select(
+                goal, route_hint=Route.RESEARCH, privacy=privacy,
+                requested_policy=privacy_policy,
+                cloudflare_enabled=bool(getattr(self.brain_manager, "cloud_enabled", False)),
+                planning=True,
+            )
+            step = PlanStep(
+                id="research",
+                description="Run bounded source-backed public research with citations.",
+                capability="research",
+                preferred_tool=research_tool.canonical_name,
+                arguments={"question": goal, "freshness": "current", "max_sources": 8, "persist": False},
+                profile=WorkerProfile.RESEARCH,
+                verification="non_empty",
+            )
+            return TaskPlan(goal, (step,), privacy=privacy, namespace=namespace)
         allowed_tools = [
             {
                 "name": tool.canonical_name,
@@ -159,7 +183,9 @@ class Planner:
                 "input_schema": _schema_contract(tool.input_schema),
             }
             for tool in self.tool_registry.list(enabled_only=True)
-            if privacy in tool.privacy_support and (privacy == "public" or not tool.transmits_data)
+            if privacy in tool.privacy_support and (
+                privacy == "public" or not tool.transmits_data or tool.privacy_resolver is not None
+            )
         ]
         instruction = (
             "Create a bounded FRIDAY task plan. Return exactly one JSON object with a single key `steps`; "

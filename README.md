@@ -60,7 +60,7 @@ FreeLLMAPI and OmniRoute remain parallel FRIDAY providers. FRIDAY does not confi
 
 ### Adaptive model policies (Phase 4D)
 
-FRIDAY classifies capability and privacy locally with deterministic rules. It does not call an LLM to choose another LLM. Unknown tasks default to SMART; greetings and simple rewrite/Q&A tasks use FAST. COMPUTER continues through the deterministic action dispatcher and makes no LLM call. RESEARCH currently uses the SMART model chain and does not perform web search. VISION and VOICE are metadata-only placeholders. Repository edits are handed to Codex and are not silently sent to a chat model.
+FRIDAY classifies capability and privacy locally with deterministic rules. It does not call an LLM to choose another LLM. Unknown tasks default to SMART; greetings and simple rewrite/Q&A tasks use FAST. COMPUTER continues through the deterministic action dispatcher and makes no LLM call. RESEARCH uses the bounded Phase 7A search/fetch/evidence flow below, then synthesizes with BrainManager and approved RESEARCH routing. VISION and VOICE are metadata-only placeholders. Repository edits are handed to Codex and are not silently sent to a chat model.
 
 - **FAST:** OmniRoute `gemini/gemini-3.1-flash-lite` → OmniRoute `gemini/gemini-2.5-flash-lite` → FreeLLMAPI → local Qwen.
 - **SMART / RESEARCH:** OmniRoute `gemini/gemini-3-flash-preview` → OmniRoute `gemini/gemini-2.5-flash` → FreeLLMAPI → explicitly enabled direct Cloudflare → local Qwen.
@@ -81,7 +81,7 @@ FRIDAY's persistent root is `D:\FRIDAY`. SQLite operational memory stays separat
 
 Obsidian desktop is optional: no account, login, plugin, or Sync is required. To use its editor later, open `D:\FRIDAY\vault` in Obsidian as a vault. Public/cloud requests can receive only public vault notes; private and local-only knowledge stays on the local PRIVATE route. No remote provider is used for ordinary vault search. Semantic embeddings remain a future optional capability.
 
-Reserved future locations are `D:\FRIDAY\data\logs`, `D:\FRIDAY\data\cache`, `D:\FRIDAY\models`, `D:\FRIDAY\runtime`, and `D:\FRIDAY\scripts`; existing runtime assets are not moved there automatically.
+Reserved locations include `D:\FRIDAY\data\research`, `D:\FRIDAY\data\logs`, `D:\FRIDAY\data\cache`, `D:\FRIDAY\models`, `D:\FRIDAY\runtime`, and `D:\FRIDAY\scripts`; existing runtime assets are not moved there automatically.
 
 ## Unified Knowledge (Phase 5C)
 
@@ -102,9 +102,7 @@ Traversal, symlinks/junctions, overlapping roots, credential names/content, hidd
 dependency directories, `.obsidian`, the real vault, and the operational memory directory are excluded.
 These limits bound ordinary local usage; concurrent hostile filesystem mutation is outside the single-user trust model.
 
-No external connectors are implemented. Future research connectors can declare `search` and `research`
-capabilities using the same result contract. Phase 6A adds Tool Registry/MCP; Phase 7A adds research;
-Phase 7B adds PDF/Office/image parsing. Run `python -B scripts/phase5c_smoke.py` for temporary-only checks.
+No external knowledge connectors are implemented. Phase 7A research uses its own bounded SearchProvider and evidence pipeline; it does not mix private Memory, Vault, or local-file contents into external queries. Phase 6A adds Tool Registry/MCP; Phase 7B adds PDF/Office/image parsing. Run `python -B scripts/phase5c_smoke.py` for temporary-only checks.
 
 ## Optional remote Laya System-1
 
@@ -133,11 +131,23 @@ PersonalJarvis is an architecture reference only. OpenHuman is not a runtime or 
 
 Multi-step requests follow `Planner -> PlanValidator -> WorkerExecutor -> ToolRegistry -> ApprovalPolicy -> ToolResult`. Simple COMPUTER actions and one-call knowledge lookups keep their direct routes. Planning uses the existing BrainManager: public plans request SMART, while private/local-only plans use PRIVATE and local Qwen only.
 
-Workers invoke tools only through `ToolRegistry` and its `ApprovalPolicy`; receipts and task events omit arguments and prompt text. Consequential/destructive steps pause with a four-field approval request. Runs support explicit approval/skip, cooperative cancellation between tool calls, deterministic verification, dry-run, and one validated repair attempt. A run is in-memory and bounded to 8 steps, 12 registry calls, one retry per safe step, and one repair. It never spawns another planner or continues indefinitely; unsupported capabilities become BLOCKED. Coding returns handoff metadata without launching Codex; Research stays unavailable until Phase 7A.
+Workers invoke tools only through `ToolRegistry` and its `ApprovalPolicy`; receipts and task events omit arguments and prompt text. Consequential/destructive steps pause with a four-field approval request. Runs support explicit approval/skip, cooperative cancellation between tool calls, deterministic verification, dry-run, and one validated repair attempt. A run is in-memory and bounded to 8 steps, 12 registry calls, one retry per safe step, and one repair. It never spawns another planner or continues indefinitely; unsupported capabilities become BLOCKED. Coding returns handoff metadata without launching Codex; Phase 7A research requests resolve to the registered `research.run` tool.
 
 Scheduling/background automation is Phase 6C, voice conversation is Phase 9A, and the HUD is Phase 10A. Run offline Phase 6B checks with `python -B scripts/phase6b_smoke.py`; its harmless MCP check uses the existing local stdio test server and makes no external network calls.
 
 Run the offline Phase 6A acceptance and Phase 5 regressions with `python -B scripts/phase6a_smoke.py` from the project root. Its MCP server is test-only and communicates over local stdio.
+
+## Local-first Research Engine (Phase 7A)
+
+The source-backed flow is `RESEARCH -> ResearchPlanner -> SearchProvider -> ResearchFetcher -> extraction/ranking/deduplication -> evidence -> ResearchSynthesizer -> claims with citations and provenance`. `research.search`, `research.fetch`, and `research.run` are read-only ToolRegistry tools; Planner and AutomationRunner use the existing WorkerExecutor path. Research is bounded to 4 search calls, 8 fetched sources, 1 fetch per source, 2 browser render fallbacks, 2 MB per page, 4 redirects, and a 45 second default run budget.
+
+The core adds no research runtime dependency and uses the standard library for HTTP fetch and static HTML/text extraction. Search is zero-cost and opt-in through an existing/self-hosted SearXNG instance; FRIDAY does not choose a public instance or paid search API. Configure `FRIDAY_RESEARCH_SEARXNG_URL`, for example `http://127.0.0.1:8888`, after setting up a local SearXNG instance. Until configured, `research.run` returns `SEARCH_CONFIGURATION_REQUIRED` and does not pretend a search occurred. Explicitly selected public source URLs can still use the safe fetch/extraction path.
+
+Before an external search, FRIDAY reduces a request to a minimal public query. Private context, Memory, Vault notes, local files, credentials, and conversation history are not added to search or synthesis inputs. If private intent cannot be separated safely, the run fails closed; `local_only` never performs external search or fetches. Public synthesis uses the existing BrainManager RESEARCH policy and local Qwen fallback. Existing optional providers remain governed by their explicit enablement and routing settings.
+
+Each evidence source retains requested/final/canonical URLs, title, domain, publication/retrieval dates, normalized text, content hash, source classification, and a citation ID. Source-derived facts require exact supporting text; model synthesis requires valid source IDs and supporting quotes; unsupported claims remain marked `UNSUPPORTED_UNVERIFIED`. Access walls, CAPTCHA/anti-bot responses, and paywalls are recorded as inaccessible. FRIDAY does not bypass them or download arbitrary binaries. PDFs are identified and deferred to Phase 7B. Research results are not automatically saved to Memory or the Vault; evidence bundles persist only when explicitly requested under `D:\FRIDAY\data\research` or `FRIDAY_RESEARCH_DATA_PATH`.
+
+Run offline deterministic checks with `python -B scripts/phase7a_smoke.py`; it uses an in-process loopback fixture server and mocked search/synthesis, with no public network calls. A live search acceptance needs a configured zero-cost SearXNG endpoint.
 
 ## Local automations (Phase 6C)
 

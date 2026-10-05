@@ -174,6 +174,10 @@ class ModelPolicyEngine:
         self.config = config or ModelPolicyConfig.from_environment()
 
     @staticmethod
+    def requires_research(command: str) -> bool:
+        return bool(_RESEARCH_CUES.search(command))
+
+    @staticmethod
     def classify_privacy(command: str, explicit: str | PrivacyLevel | None = None) -> PrivacyLevel:
         if isinstance(explicit, PrivacyLevel):
             explicit_level = explicit

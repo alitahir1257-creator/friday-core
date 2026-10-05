@@ -343,6 +343,7 @@ class WorkerExecutor:
             "caller": "friday_worker",
             "privacy": run.plan.privacy,
             "action_metadata": {"task_id": run.id, "step_id": step.id, "capability": step.capability},
+            "cancellation_check": run.cancelled,
         }
         if approval is not None:
             kwargs["approval_callback"] = lambda _request: approval

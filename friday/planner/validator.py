@@ -154,14 +154,32 @@ class PlanValidator:
     @staticmethod
     def _validate_tool(plan: TaskPlan, step: PlanStep, tool: Any) -> None:
         tool_parts = set(re.split(r"[._-]+", tool.canonical_name.casefold()))
-        if tool_parts & _FORBIDDEN_TOOL_PARTS or {tag.casefold() for tag in tool.capabilities} & _FORBIDDEN_CAPABILITIES:
+        capabilities = {tag.casefold() for tag in tool.capabilities}
+        forbidden_parts = tool_parts & _FORBIDDEN_TOOL_PARTS
+        if (
+            tool.canonical_name == "research.run"
+            and tool.source == "native"
+            and "research" in capabilities
+        ):
+            forbidden_parts.discard("run")
+        if forbidden_parts or capabilities & _FORBIDDEN_CAPABILITIES:
             raise PlanValidationError("FORBIDDEN_TOOL", "Generic shell and command tools cannot run in Phase 6B.")
         if step.capability not in {tag.casefold() for tag in tool.capabilities}:
             raise PlanValidationError("CAPABILITY_MISMATCH", "The preferred tool does not provide the requested capability.")
         if plan.privacy not in tool.privacy_support:
             raise PlanValidationError("PRIVACY_DENIED", "The tool does not support the task privacy level.")
         if plan.privacy != "public" and tool.transmits_data:
-            raise PlanValidationError("PRIVACY_DENIED", "Private task data cannot be sent to a remote tool.")
+            allowed = False
+            if tool.privacy_resolver is not None:
+                try:
+                    allowed = bool(tool.privacy_resolver(
+                        step.arguments,
+                        ToolInvocationContext(caller="friday_worker", privacy=plan.privacy),
+                    ))
+                except Exception:
+                    allowed = False
+            if not allowed:
+                raise PlanValidationError("PRIVACY_DENIED", "Private task data cannot be sent to a remote tool.")
         if tool.canonical_name == "knowledge.search":
             try:
                 namespace = normalize_namespace(step.arguments.get("namespace", "global"))

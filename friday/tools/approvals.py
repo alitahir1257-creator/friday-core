@@ -34,14 +34,14 @@ class ApprovalPolicy:
             return ApprovalDecision.DENY
         if context.privacy not in tool.privacy_support:
             return ApprovalDecision.DENY
-        if context.privacy != "public" and tool.transmits_data:
-            return ApprovalDecision.DENY
+        privacy_allowed = context.privacy == "public" or not tool.transmits_data
         if tool.privacy_resolver is not None:
             try:
-                if not tool.privacy_resolver(arguments, context):
-                    return ApprovalDecision.DENY
+                privacy_allowed = bool(tool.privacy_resolver(arguments, context))
             except Exception:
-                return ApprovalDecision.DENY
+                privacy_allowed = False
+        if not privacy_allowed:
+            return ApprovalDecision.DENY
 
         risk = risk_level or effective_risk(tool, arguments, context)
         if risk == RiskLevel.SENSITIVE and (

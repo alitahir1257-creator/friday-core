@@ -27,6 +27,7 @@ class ToolInvocationContext:
     privacy: str = "public"
     explicit_approval: bool = False
     action_metadata: Mapping[str, Any] = field(default_factory=dict)
+    cancellation_check: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         normalized = str(getattr(self.privacy, "value", self.privacy)).casefold()

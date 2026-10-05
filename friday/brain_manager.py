@@ -493,6 +493,7 @@ class BrainManager:
         *,
         planning: bool = False,
         system_instruction: str | None = None,
+        include_knowledge_context: bool = True,
     ) -> BrainReply:
         metadata = request_metadata or BrainRequestMetadata()
         privacy = self.policy_engine.classify_privacy(command, metadata.effective_privacy)
@@ -540,21 +541,22 @@ class BrainManager:
         targets = selection.targets
         if selection.privacy in {PrivacyLevel.PRIVATE, PrivacyLevel.LOCAL_ONLY}:
             targets = (ModelTarget("local", self.local_model),)
-        try:
-            context = self.unified.build_context(
-                command, namespace=metadata.memory_namespace,
-                privacy_level=selection.privacy.value, route_backend=selection.preferred_backend,
-            )
-            if context.privacy not in {"public", "private", "local_only"} or (
-                context.privacy != "public" and (
-                    selection.privacy == PrivacyLevel.PUBLIC or selection.preferred_backend != "local"
+        if include_knowledge_context:
+            try:
+                context = self.unified.build_context(
+                    command, namespace=metadata.memory_namespace,
+                    privacy_level=selection.privacy.value, route_backend=selection.preferred_backend,
                 )
-            ):
-                raise PermissionError("Unified context is not allowed on this route.")
-            if context.text:
-                messages[1:1] = [{"role": "system", "content": context.text}]
-        except Exception as error:
-            _log_provider(f"unified_retrieval_failed error={type(error).__name__}")
+                if context.privacy not in {"public", "private", "local_only"} or (
+                    context.privacy != "public" and (
+                        selection.privacy == PrivacyLevel.PUBLIC or selection.preferred_backend != "local"
+                    )
+                ):
+                    raise PermissionError("Unified context is not allowed on this route.")
+                if context.text:
+                    messages[1:1] = [{"role": "system", "content": context.text}]
+            except Exception as error:
+                _log_provider(f"unified_retrieval_failed error={type(error).__name__}")
 
         started = time.perf_counter()
         fallback_count = 0

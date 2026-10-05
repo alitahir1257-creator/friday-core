@@ -27,6 +27,8 @@ from friday.planner import (
     is_multi_step_request,
 )
 from friday.tools.adapters import register_computer_tools, register_knowledge_tools
+from friday.tools.research import register_research_tools
+from friday.research.engine import ResearchEngine
 from friday.tools.models import ToolResult
 from friday.tools.registry import ToolRegistry
 from typing import Callable
@@ -43,6 +45,7 @@ class FridayCore:
         model_policy_engine: ModelPolicyEngine | None = None,
         planner: Planner | None = None,
         worker_executor: WorkerExecutor | None = None,
+        research_engine: ResearchEngine | None = None,
     ) -> None:
         self._router = router if router is not None else create_router()
         self._brain_manager = brain_manager or BrainManager(profile)
@@ -57,6 +60,8 @@ class FridayCore:
         self.tool_registry = ToolRegistry()
         register_computer_tools(self.tool_registry, self._computer_controller)
         register_knowledge_tools(self.tool_registry, getattr(self._brain_manager, "unified", None))
+        self.research_engine = research_engine or ResearchEngine(self._brain_manager)
+        register_research_tools(self.tool_registry, self.research_engine)
         self.mcp = MCPClientManager(self.tool_registry)
         self.planner = planner or Planner(self._brain_manager, self.tool_registry, self._model_policy_engine)
         self.worker_executor = worker_executor or WorkerExecutor(
@@ -124,8 +129,12 @@ class FridayCore:
             )
             return "Repository work is assigned to Codex; FRIDAY chat fallback is disabled.", None, decision
 
-        if (
+        research_requested = (
             selection.policy == ModelPolicy.RESEARCH
+            or self._model_policy_engine.requires_research(command)
+        )
+        if (
+            research_requested
             and not self.tool_registry.find_by_capability("research")
             and not self._is_knowledge_lookup(command)
         ):
@@ -159,7 +168,7 @@ class FridayCore:
             )
             return result.summary, None, decision
 
-        if multi_step or selection.policy == ModelPolicy.RESEARCH:
+        if multi_step or research_requested:
             planning_policy = ModelPolicy.PRIVATE if privacy != PrivacyLevel.PUBLIC else ModelPolicy.SMART
             planning_selection = self._model_policy_engine.select(
                 command,
@@ -182,6 +191,8 @@ class FridayCore:
             if last_result is not None:
                 self.last_tool_result = last_result
             self._last_model_selection = self.planner.last_selection or planning_selection
+            if research_requested and not multi_step and last_result is not None:
+                return last_result.summary, None, decision
             return task_result.summary, None, decision
 
         ambiguity = getattr(self._router, "ambiguous_routes", None)

@@ -611,7 +611,7 @@ def run() -> None:
             assert any(event.event == "step_completed" for event in read_worker.current_task.events)
             assert all("arguments" not in asdict(event) and "goal" not in asdict(event) for event in read_worker.current_task.events)
 
-            # U-V. Coding handoff is structured and Research is explicitly unavailable.
+            # U-V. Coding handoff is structured and Research reports that live search needs configuration.
             coding_brain = _BrainSpy()
             coding_core = FridayCore(AssistantProfile(), router=create_router(), brain_manager=coding_brain)
             coding_response, _, _ = coding_core.respond("Fix failing tests in my repository.")
@@ -625,9 +625,9 @@ def run() -> None:
             research_brain = _BrainSpy()
             research_core = FridayCore(AssistantProfile(), router=create_router(), brain_manager=research_brain)
             research_response, _, _ = research_core.respond("Research the latest browser testing tools and cite sources.")
-            assert "unavailable" in research_response.casefold() and "Phase 7A" in research_response
+            assert "SEARCH_CONFIGURATION_REQUIRED" in research_response
             assert research_brain.calls == 0 and research_core.planner.model_calls == 0
-            assert research_core.current_task_run.status == TaskStatus.BLOCKED
+            assert research_core.current_task_run.status == TaskStatus.SUCCEEDED
             research_core.close()
 
             # W. Current-task state exposes the executing step without arguments or goal text.
