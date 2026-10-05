@@ -14,6 +14,7 @@ from typing import Any, Iterator
 
 from friday.memory.models import MemoryItem, MemoryKind, MemoryLink, MemoryPrivacy, MemoryStatus
 from friday.memory.policy import normalize_text
+from friday.paths import MEMORY_DB_PATH
 
 
 def utc_now() -> str:
@@ -34,10 +35,7 @@ def default_memory_db_path(environ: dict[str, str] | None = None) -> Path:
     override = values.get("FRIDAY_MEMORY_DB_PATH", "").strip()
     if override:
         return Path(override).expanduser()
-    local_app_data = values.get("LOCALAPPDATA", "").strip()
-    if local_app_data:
-        return Path(local_app_data) / "FRIDAY" / "memory" / "friday-memory.sqlite3"
-    return Path.home() / ".local" / "share" / "FRIDAY" / "memory" / "friday-memory.sqlite3"
+    return MEMORY_DB_PATH
 
 
 class SQLiteMemoryStore:

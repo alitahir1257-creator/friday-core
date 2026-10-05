@@ -72,9 +72,16 @@ Optional model overrides are `FRIDAY_FAST_MODEL`, `FRIDAY_FAST_FALLBACK_MODEL`, 
 
 The official project documents MCP (`omniroute --mcp`), A2A, Memory, and Skills, but those features are deferred and are not part of FRIDAY's integration. If OmniRoute is not installed, its official Windows npm path is to use a Node.js version allowed by package metadata (`>=20.20.2 <21`, `>=22.22.2 <23`, or `>=24.0.0 <25`), run `npm install -g omniroute`, then run `omniroute` in PowerShell. The server and dashboard use port `20128` by default. Create an API key in Dashboard → Endpoints only if the instance requires one, then set it in `FRIDAY_OMNIROUTE_API_KEY`; do not paste the key into `profile.json` or source files. See the [official OmniRoute README](https://github.com/Xchat1/omniroute), [User Guide](https://github.com/Xchat1/omniroute/blob/main/docs/USER_GUIDE.md), and [runtime package metadata](https://raw.githubusercontent.com/Xchat1/omniroute/main/package.json) for current install requirements.
 
-## Persistent memory (Phase 5A)
+## Local storage (Phase 5A / 5B)
 
-FRIDAY stores explicitly accepted facts, preferences, decisions, project/task state, relationships, and meaningful episodes in a local SQLite database; it does not persist every chat, transient small talk, or likely credentials. The default is `%LOCALAPPDATA%\FRIDAY\memory\friday-memory.sqlite3`; set `FRIDAY_MEMORY_DB_PATH` to choose another local path. Retrieval is deterministic and uses SQLite FTS5 when available, with text matching as a fallback. Public routes receive public memories only; private and local-only memories are eligible only for the local PRIVATE route. Memory retrieval never makes network calls. Obsidian integration is Phase 5B; semantic embeddings remain a future optional local capability.
+FRIDAY's persistent root is `D:\FRIDAY`. SQLite operational memory stays separate from the human-readable Markdown knowledge vault:
+
+- Memory: `D:\FRIDAY\data\memory\friday-memory.sqlite3` (`FRIDAY_MEMORY_DB_PATH` overrides it). SQLite/FTS5 retrieval is local and deterministic. An old database under `%LOCALAPPDATA%\FRIDAY\memory` is never migrated or deleted automatically; migrate it manually only if needed.
+- Knowledge: `D:\FRIDAY\vault` (`FRIDAY_VAULT_PATH` overrides it). Notes are ordinary UTF-8 Markdown with optional editable frontmatter and Obsidian-style wikilinks. Vault initialization is explicit; FRIDAY does not import conversations or populate personal data.
+
+Obsidian desktop is optional: no account, login, plugin, or Sync is required. To use its editor later, open `D:\FRIDAY\vault` in Obsidian as a vault. Public/cloud requests can receive only public vault notes; private and local-only knowledge stays on the local PRIVATE route. No remote provider is used for ordinary vault search. Semantic embeddings remain a future optional capability.
+
+Reserved future locations are `D:\FRIDAY\data\logs`, `D:\FRIDAY\data\cache`, `D:\FRIDAY\models`, `D:\FRIDAY\runtime`, and `D:\FRIDAY\scripts`; existing runtime assets are not moved there automatically.
 
 ## Optional remote Laya System-1
 

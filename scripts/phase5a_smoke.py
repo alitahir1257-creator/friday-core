@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 import friday.brain_manager as brain_manager_module  # noqa: E402
 from friday.brain_manager import BrainManager, BrainReply, BrainRequestMetadata  # noqa: E402
 from friday.lifecycle import LocalBrainState  # noqa: E402
+from friday.knowledge import KnowledgeVault  # noqa: E402
 from friday.memory import (  # noqa: E402
     MemoryKind,
     MemoryManager,
@@ -244,7 +245,7 @@ def run() -> dict[str, object]:
         brain_manager_module.LOG_PATH = base / "brain.log"
         brain = BrainManager(
             AssistantProfile(), local_provider=local, omniroute_provider=omn,
-            memory_manager=manager,
+            memory_manager=manager, knowledge_vault=KnowledgeVault(base / "vault"),
         )
         brain.respond(
             "Rewrite clearly: the app is very fast; architecture marker.", [],
@@ -276,6 +277,7 @@ def run() -> dict[str, object]:
         fallback_brain = BrainManager(
             AssistantProfile(), local_provider=FakeLocalProvider(),
             omniroute_provider=fallback_omn, memory_manager=BrokenMemory(),
+            knowledge_vault=KnowledgeVault(base / "vault"),
         )
         fallback_reply = fallback_brain.respond(
             "Rewrite clearly: memory retrieval should fail safely.", [],
@@ -287,7 +289,7 @@ def run() -> dict[str, object]:
         brain_manager_module.LOG_PATH = old_log_path
         default_path = default_memory_db_path({"LOCALAPPDATA": r"Z:\FridayTest"})
         override_path = default_memory_db_path({"FRIDAY_MEMORY_DB_PATH": r"Z:\custom\memory.sqlite3"})
-        assert str(default_path).endswith(r"Z:\FridayTest\FRIDAY\memory\friday-memory.sqlite3")
+        assert default_path == Path(r"D:\FRIDAY\data\memory\friday-memory.sqlite3")
         assert str(override_path).endswith(r"Z:\custom\memory.sqlite3")
         print("Default DB path: %s" % default_path.as_posix())
 

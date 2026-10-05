@@ -21,6 +21,7 @@ from urllib.request import (
 )
 
 from friday.brain import LOG_PATH, MAX_OUTPUT_TOKENS, MODEL_NAME, LocalQwenBrain
+from friday.knowledge import KnowledgeVault
 from friday.lifecycle import LocalBrainLifecycleManager
 from friday.memory import MemoryManager
 from friday.model_policy import (
@@ -460,6 +461,7 @@ class BrainManager:
         freellmapi_provider: FreeLLMAPIProvider | None = None,
         omniroute_provider: OmniRouteProvider | None = None,
         memory_manager: MemoryManager | None = None,
+        knowledge_vault: KnowledgeVault | None = None,
     ) -> None:
         self.cloud_enabled = profile.cloud_brain_enabled
         self.local = local_provider or LocalQwenProvider(profile)
@@ -472,6 +474,11 @@ class BrainManager:
         except Exception as error:
             self.memory = None
             self._log_memory_event(f"memory_unavailable error={type(error).__name__}")
+        try:
+            self.knowledge = knowledge_vault if knowledge_vault is not None else KnowledgeVault()
+        except Exception as error:
+            self.knowledge = None
+            _log_provider(f"knowledge_unavailable error={type(error).__name__}")
 
     def respond(
         self,
@@ -523,6 +530,7 @@ class BrainManager:
         targets = selection.targets
         if selection.privacy in {PrivacyLevel.PRIVATE, PrivacyLevel.LOCAL_ONLY}:
             targets = (ModelTarget("local", self.local_model),)
+        context_messages: list[dict[str, str]] = []
         if self.memory is not None:
             try:
                 memory_context = self.memory.build_context(
@@ -532,9 +540,22 @@ class BrainManager:
                     route_backend=selection.preferred_backend,
                 )
                 if memory_context.text:
-                    messages.insert(1, {"role": "system", "content": memory_context.text})
+                    context_messages.append({"role": "system", "content": memory_context.text})
             except Exception as error:
                 self._log_memory_event(f"memory_retrieval_failed error={type(error).__name__}")
+        if self.knowledge is not None:
+            try:
+                knowledge_context = self.knowledge.build_context(
+                    command,
+                    namespace=metadata.memory_namespace,
+                    privacy_level=selection.privacy.value,
+                    route_backend=selection.preferred_backend,
+                )
+                if knowledge_context.text:
+                    context_messages.append({"role": "system", "content": knowledge_context.text})
+            except Exception as error:
+                _log_provider(f"knowledge_retrieval_failed error={type(error).__name__}")
+        messages[1:1] = context_messages
 
         started = time.perf_counter()
         fallback_count = 0
