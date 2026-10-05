@@ -27,8 +27,11 @@ from friday.automation import (  # noqa: E402
     RunStatus,
     TriggerType,
 )
+from friday.capabilities.registry import Action, ActionPlan, Capability, Risk  # noqa: E402
+from friday.core import FridayCore  # noqa: E402
 from friday.model_policy import ModelPolicy  # noqa: E402
 from friday.planner import Planner, WorkerExecutor  # noqa: E402
+from friday.tools.adapters import register_computer_tools  # noqa: E402
 from friday.tools.models import RiskLevel, ToolDefinition, ToolResult  # noqa: E402
 from friday.tools.registry import ToolRegistry  # noqa: E402
 
@@ -413,6 +416,39 @@ def run() -> None:
         else:
             raise AssertionError("A completed approval was accepted a second time.")
         check(f.direct_calls == prior_direct_calls, "AB duplicate approval rejected")
+        f.close()
+
+        # The production direct adapter uses FRIDAY's existing COMPUTER tool and registry.
+        f = Fixture(temp_root / "direct-computer.sqlite3")
+
+        class FakeComputer:
+            def __init__(self) -> None:
+                self.planner = self
+                self.calls = 0
+
+            @staticmethod
+            def plan(_goal: str) -> ActionPlan:
+                return ActionPlan((Action(Capability.COMPUTER, "OPEN_APP", "Notepad"),))
+
+            def execute(self, _plan: ActionPlan, approved: bool = False) -> tuple[str, Risk]:
+                self.calls += 1
+                return "Opened Notepad.", Risk.SAFE
+
+        computer = FakeComputer()
+        register_computer_tools(f.registry, lambda: computer)
+        f.manager.close()
+        core = object.__new__(FridayCore)
+        core._computer = computer
+        core.tool_registry = f.registry
+        core.planner = f.planner
+        core.worker_executor = f.worker
+        f.manager = AutomationManager.from_core(core, database_path=f.path, clock=f.clock)
+        direct_computer = f.manager.create("direct computer", "open Notepad", one_time(BASE), now=BASE)
+        direct_computer_result = f.manager.run_now(direct_computer.id, now=BASE)
+        check(direct_computer_result.status == RunStatus.COMPLETED and computer.calls == 1
+              and f.planner.model_calls == 0
+              and f.registry.receipts[-1].tool_name == "computer.open_app",
+              "AB existing deterministic COMPUTER path")
         f.close()
 
         # AC-AE regressions run separately against the established smoke suites.
