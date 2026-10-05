@@ -10,7 +10,7 @@ The first GENERAL command checks http://127.0.0.1:8080/v1. If it is unavailable,
 
 Edit profile.json to change the assistant name, user name, language, or concise response style.
 
-The `friday` package separates the Tkinter app, local Qwen brain, profile, bounded conversation history, and route labels. GENERAL, CODING, RESEARCH, and MEMORY use Qwen. COMPUTER uses a deterministic action planner and the computer capability dispatcher. Unrecognized computer actions stop with a clear error.
+The `friday` package separates the Tkinter app, local Qwen brain, profile, bounded conversation history, and route labels. FAST/SMART/RESEARCH use approved provider pools with local Qwen fallback; PRIVATE stays on local Qwen; repository changes are handed to Codex. COMPUTER uses a deterministic action planner and the computer capability dispatcher. Unrecognized computer actions stop with a clear error.
 
 For computer control, use Python 3.11 and install the two packages in `requirements-computer.txt`. Windows UI Automation uses pywinauto. Website automation uses Playwright with an already installed Chrome or Edge executable; no Playwright browser install command is needed. Its dedicated local browser profile is ignored by Git. The UI asks for approval before consequential actions.
 
@@ -28,7 +28,7 @@ For zero-cost use, keep the Cloudflare account on the Workers Free plan. Cloudfl
 
 ### Optional FreeLLMAPI gateway
 
-FreeLLMAPI is an optional downstream gateway behind `BrainManager`; it does not replace FRIDAY's provider selection or local Qwen fallback. When OmniRoute is disabled, FRIDAY preserves the existing order: explicitly enabled Cloudflare, FreeLLMAPI, then local Qwen. When OmniRoute is enabled, FRIDAY tries OmniRoute, FreeLLMAPI, explicitly enabled Cloudflare, then local Qwen. Each remote provider gets at most one FRIDAY attempt before fallback.
+FreeLLMAPI is an optional FRIDAY provider alongside OmniRoute; it does not replace FRIDAY's policy selection or local Qwen fallback. Adaptive requests use the policy-specific order documented below. Each selected backend/model target gets at most one FRIDAY attempt before fallback.
 
 The gateway is disabled by default. To opt in, set these Windows environment variables and restart FRIDAY:
 
@@ -42,21 +42,33 @@ FRIDAY makes one non-streaming OpenAI-compatible chat-completions request. A dis
 
 ### Optional OmniRoute orchestration gateway
 
-OmniRoute is a separate optional OpenAI-compatible gateway in front of FRIDAY's existing provider fallbacks. It is disabled by default. FRIDAY does not install or start OmniRoute, enable its MCP/A2A/Memory/Skills features, configure downstream providers, or select a paid model. `model=auto` is the documented generic routing value, but it does not guarantee a free route. Enable this provider only after configuring and checking the local OmniRoute route and its cost.
+OmniRoute is a separate optional OpenAI-compatible FRIDAY provider. It is disabled by default. FRIDAY does not install or start OmniRoute, enable its MCP/A2A/Memory/Skills features, or configure downstream providers. Phase 4D sends explicit allowlisted Gemini free model IDs for FAST/SMART; the app does not use OmniRoute `auto` for adaptive requests.
 
 Set these Windows environment variables to opt in, then restart FRIDAY:
 
 - `FRIDAY_OMNIROUTE_ENABLED=true`
 - `FRIDAY_OMNIROUTE_BASE_URL` (optional; defaults to `http://127.0.0.1:20128/v1`)
 - `FRIDAY_OMNIROUTE_API_KEY` (optional unless the local OmniRoute instance requires API-key authentication; environment only)
-- `FRIDAY_OMNIROUTE_MODEL` (optional; defaults to documented `auto`)
+- `FRIDAY_OMNIROUTE_MODEL` (legacy setting; adaptive routing ignores it and sends an approved explicit model)
 - `FRIDAY_OMNIROUTE_TIMEOUT_SECONDS` (optional; defaults to `15`, maximum `60`)
 
-FRIDAY sends one non-streaming request to `/chat/completions`. Timeout, HTTP errors, or malformed responses proceed to the next configured provider without an FRIDAY retry loop. The API key is not stored in `profile.json` or written to logs. Requests marked `private` through the `BrainRequestMetadata` hook skip remote System-One route hints and use only brain-provider names explicitly listed as trusted; otherwise they go to local Qwen. Current UI requests are not automatically classified, so keep private or sensitive material on local Qwen or a provider whose trust and handling you have verified.
+FRIDAY sends one non-streaming request to `/chat/completions` per selected model attempt. Timeout, HTTP errors, or malformed responses proceed to the next approved target; attempts are bounded and are not recursively routed. The API key is not stored in `profile.json` or written to logs. Requests classified `private` or `local_only` skip System-One, use local Qwen only, and are excluded from shared conversation history. Sensitive prompt bodies are not logged.
 
 The OmniRoute base URL is restricted to a loopback IP address, so this integration cannot silently send requests to a remote gateway.
 
-FreeLLMAPI and OmniRoute remain parallel FRIDAY providers. OmniRoute documents dynamic OpenAI-compatible downstream providers, but its current official documentation also describes a guarded fetch path that blocks private/local URLs. FRIDAY does not disable that guard or configure a loopback FreeLLMAPI endpoint inside OmniRoute. The Kilo route previously used through FreeLLMAPI may log prompts and outputs for training; `auto` is not a privacy-safe route. Keep private data on local Qwen or explicitly trusted configured providers.
+FreeLLMAPI and OmniRoute remain parallel FRIDAY providers. FRIDAY does not configure FreeLLMAPI inside OmniRoute or create a custom recursive provider chain. The Kilo route previously used through FreeLLMAPI may log prompts and outputs for training; private data stays on local Qwen.
+
+### Adaptive model policies (Phase 4D)
+
+FRIDAY classifies capability and privacy locally with deterministic rules. It does not call an LLM to choose another LLM. Unknown tasks default to SMART; greetings and simple rewrite/Q&A tasks use FAST. COMPUTER continues through the deterministic action dispatcher and makes no LLM call. RESEARCH currently uses the SMART model chain and does not perform web search. VISION and VOICE are metadata-only placeholders. Repository edits are handed to Codex and are not silently sent to a chat model.
+
+- **FAST:** OmniRoute `gemini/gemini-3.1-flash-lite` → OmniRoute `gemini/gemini-2.5-flash-lite` → FreeLLMAPI → local Qwen.
+- **SMART / RESEARCH:** OmniRoute `gemini/gemini-3-flash-preview` → OmniRoute `gemini/gemini-2.5-flash` → FreeLLMAPI → explicitly enabled direct Cloudflare → local Qwen.
+- **PRIVATE:** local Qwen only. If local Qwen fails, FRIDAY returns a local/private route error.
+- **CODING:** Codex handoff metadata; no automatic chat-model fallback.
+- **COMPUTER:** deterministic OS/browser dispatcher only.
+
+Optional model overrides are `FRIDAY_FAST_MODEL`, `FRIDAY_FAST_FALLBACK_MODEL`, `FRIDAY_SMART_MODEL`, and `FRIDAY_SMART_FALLBACK_MODEL`. Defaults are listed above. Overrides outside the four Gemini model IDs verified as free for this phase are ignored, so an unknown or paid model cannot enter the adaptive OmniRoute pool through these variables. Provider free-tier availability and account limits remain controlled by the provider account.
 
 The official project documents MCP (`omniroute --mcp`), A2A, Memory, and Skills, but those features are deferred and are not part of FRIDAY's integration. If OmniRoute is not installed, its official Windows npm path is to use a Node.js version allowed by package metadata (`>=20.20.2 <21`, `>=22.22.2 <23`, or `>=24.0.0 <25`), run `npm install -g omniroute`, then run `omniroute` in PowerShell. The server and dashboard use port `20128` by default. Create an API key in Dashboard → Endpoints only if the instance requires one, then set it in `FRIDAY_OMNIROUTE_API_KEY`; do not paste the key into `profile.json` or source files. See the [official OmniRoute README](https://github.com/Xchat1/omniroute), [User Guide](https://github.com/Xchat1/omniroute/blob/main/docs/USER_GUIDE.md), and [runtime package metadata](https://raw.githubusercontent.com/Xchat1/omniroute/main/package.json) for current install requirements.
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import time
+
 from friday.brain import LOG_PATH
 from friday.brain_manager import BrainManager, BrainRequestMetadata
 from friday.conversation import ConversationHistory
@@ -12,6 +15,7 @@ from friday.router import Route
 from friday.system_one import HostedJevProvider, RemoteLayaProvider, SystemOneManager
 from friday.capabilities.registry import Risk
 from friday.capabilities.computer.controller import ComputerController
+from friday.model_policy import ModelPolicy, ModelPolicyEngine, ModelSelection, PrivacyLevel
 from typing import Callable
 
 
@@ -23,6 +27,7 @@ class FridayCore:
         brain_manager: BrainManager | None = None,
         laya_client: RemoteLayaClient | None = None,
         systemone_manager: SystemOneManager | None = None,
+        model_policy_engine: ModelPolicyEngine | None = None,
     ) -> None:
         self._router = router if router is not None else create_router()
         self._brain_manager = brain_manager or BrainManager(profile)
@@ -31,9 +36,16 @@ class FridayCore:
             laya_provider=RemoteLayaProvider(self._laya_client),
             jev_provider=HostedJevProvider.from_environment(),
         )
+        self._model_policy_engine = model_policy_engine or ModelPolicyEngine()
         self._history = ConversationHistory(max_turns=6)
         self._computer: ComputerController | None = None
         self.pending_approval: str | None = None
+        self._last_model_selection: ModelSelection | None = None
+
+    @property
+    def last_model_selection(self) -> ModelSelection | None:
+        """Return the latest secret-free policy and actual route metadata."""
+        return self._last_model_selection
 
     @property
     def laya_status(self) -> str:
@@ -52,11 +64,13 @@ class FridayCore:
         request_metadata: BrainRequestMetadata | None = None,
     ) -> tuple[str, int | None, RoutingDecision]:
         decision = self._router.route(command)
+        requested_privacy = (
+            request_metadata.effective_privacy if request_metadata is not None else None
+        )
+        privacy = self._model_policy_engine.classify_privacy(command, requested_privacy)
         ambiguity = getattr(self._router, "ambiguous_routes", None)
         candidates = ambiguity(command) if callable(ambiguity) else None
-        if candidates and (
-            request_metadata is None or request_metadata.sensitivity != "private"
-        ):
+        if decision.route != Route.COMPUTER and candidates and privacy == PrivacyLevel.PUBLIC:
             remote_decision = self._systemone_manager.classify_route(command, candidates)
             if remote_decision is not None:
                 decision = RoutingDecision(
@@ -65,36 +79,72 @@ class FridayCore:
                     reason="System-One route hint accepted",
                     source=remote_decision.provider,
                 )
+
+        selection = self._model_policy_engine.select(
+            command,
+            route_hint=decision.route,
+            privacy=privacy,
+            requested_policy=request_metadata.task_class if request_metadata is not None else None,
+            cloudflare_enabled=bool(getattr(self._brain_manager, "cloud_enabled", False)),
+        )
+        if selection.policy == ModelPolicy.COMPUTER and decision.route != Route.COMPUTER:
+            decision = RoutingDecision(
+                route=Route.COMPUTER,
+                confidence=1.0,
+                reason=selection.reason,
+                source="model_policy",
+            )
+        policy_routes = {
+            ModelPolicy.CODING: Route.CODING,
+            ModelPolicy.RESEARCH: Route.RESEARCH,
+        }
+        if selection.policy in policy_routes and decision.route != policy_routes[selection.policy]:
+            decision = RoutingDecision(
+                route=policy_routes[selection.policy],
+                confidence=1.0,
+                reason=selection.reason,
+                source="model_policy",
+            )
         with LOG_PATH.open("a", encoding="utf-8") as log:
             log.write(
                 f"route={decision.route.value} source={decision.source} "
-                f"confidence={decision.confidence:.2f} reason={decision.reason}\n"
+                f"confidence={decision.confidence:.2f} reason={selection.reason} "
+                f"policy={selection.policy.value} privacy={selection.privacy.value}\n"
             )
 
         if decision.route == Route.COMPUTER:
+            started = time.perf_counter()
             if on_status is not None:
                 on_status("EXECUTING")
             if self._computer is None:
                 self._computer = ComputerController()
             answer, risk = self._computer.execute_request(command)
             self.pending_approval = command if risk == Risk.CONFIRM else None
+            self._last_model_selection = replace(
+                selection,
+                selected_backend="computer",
+                latency_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
             return answer, None, decision
 
-        if request_metadata is None:
-            reply = self._brain_manager.respond(command, self._history.messages(), on_status)
-        else:
-            reply = self._brain_manager.respond(
-                command,
-                self._history.messages(),
-                on_status,
-                request_metadata=request_metadata,
-            )
+        reply = self._brain_manager.respond(
+            command,
+            self._history.messages(),
+            on_status,
+            request_metadata=request_metadata,
+            model_selection=selection,
+        )
+        self._last_model_selection = reply.selection or selection
         answer = reply.text
-        self._history.add_exchange(command, answer)
+        if selection.privacy == PrivacyLevel.PUBLIC and selection.policy != ModelPolicy.CODING:
+            self._history.add_exchange(command, answer)
         with LOG_PATH.open("a", encoding="utf-8") as log:
             log.write(
                 f"brain={reply.provider} prompt_tokens={reply.prompt_tokens} "
-                f"output_tokens={reply.completion_tokens if reply.completion_tokens is not None else 'unknown'}\n"
+                f"output_tokens={reply.completion_tokens if reply.completion_tokens is not None else 'unknown'} "
+                f"policy={selection.policy.value} backend={reply.provider} "
+                f"model={reply.model or 'unknown'} latency_ms={reply.latency_ms if reply.latency_ms is not None else 'unknown'} "
+                f"fallback_count={reply.fallback_count}\n"
             )
         return answer, reply.prompt_tokens, decision
 

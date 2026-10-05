@@ -7,7 +7,8 @@ import json
 import math
 import os
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -19,8 +20,16 @@ from urllib.request import (
     build_opener,
 )
 
-from friday.brain import LOG_PATH, MAX_OUTPUT_TOKENS, LocalQwenBrain
+from friday.brain import LOG_PATH, MAX_OUTPUT_TOKENS, MODEL_NAME, LocalQwenBrain
 from friday.lifecycle import LocalBrainLifecycleManager
+from friday.model_policy import (
+    APPROVED_FREE_GEMINI_MODELS,
+    ModelPolicy,
+    ModelPolicyEngine,
+    ModelSelection,
+    ModelTarget,
+    PrivacyLevel,
+)
 from friday.profile import AssistantProfile
 
 
@@ -59,6 +68,12 @@ class BrainReply:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     provider: str = ""
+    model: str | None = None
+    policy: ModelPolicy | None = None
+    privacy: PrivacyLevel = PrivacyLevel.PUBLIC
+    latency_ms: float | None = None
+    fallback_count: int = 0
+    selection: ModelSelection | None = None
 
 
 @dataclass(frozen=True)
@@ -67,13 +82,28 @@ class BrainRequestMetadata:
 
     sensitivity: str = "public"
     trusted_remote_providers: frozenset[str] = frozenset()
+    privacy: str | None = None
+    task_class: str | None = None
 
     def __post_init__(self) -> None:
-        if self.sensitivity not in {"public", "private"}:
-            raise ValueError("sensitivity must be 'public' or 'private'.")
+        valid = {"public", "private", "local_only"}
+        if self.sensitivity not in valid or (self.privacy is not None and self.privacy not in valid):
+            raise ValueError("privacy must be 'public', 'private', or 'local_only'.")
+        if self.task_class is not None and self.task_class not in {policy.value for policy in ModelPolicy}:
+            raise ValueError("task_class must be a supported model policy.")
+
+    @property
+    def effective_privacy(self) -> str:
+        levels = {"public": 0, "private": 1, "local_only": 2}
+        values = [self.sensitivity, self.privacy or "public"]
+        if self.task_class == ModelPolicy.PRIVATE.value:
+            values.append("private")
+        return max(values, key=levels.__getitem__)
 
     def allows_remote(self, provider_name: str) -> bool:
-        return self.sensitivity == "public" or provider_name in self.trusted_remote_providers
+        return self.effective_privacy == "public" and (
+            not self.trusted_remote_providers or provider_name in self.trusted_remote_providers
+        )
 
 
 class BrainProvider(Protocol):
@@ -336,12 +366,31 @@ class OmniRouteProvider:
         return self._status.upper()
 
     def chat(self, messages: list[dict[str, str]]) -> BrainReply:
+        if self.model not in APPROVED_FREE_GEMINI_MODELS:
+            raise RuntimeError("OmniRoute requires an explicit approved free model.")
+        return self._approved_reply(messages, self.model)
+
+    def chat_with_model(self, messages: list[dict[str, str]], model: str) -> BrainReply:
+        """Send one request to an explicitly approved free Gemini model."""
+        if model not in APPROVED_FREE_GEMINI_MODELS:
+            raise RuntimeError("OmniRoute model is outside the approved free model pool.")
+        return self._approved_reply(messages, model)
+
+    def _approved_reply(self, messages: list[dict[str, str]], model: str) -> BrainReply:
+        reply = self._chat(messages, model)
+        returned_name = reply.model.rsplit("/", 1)[-1] if reply.model else None
+        requested_name = model.rsplit("/", 1)[-1]
+        if returned_name is not None and returned_name != requested_name:
+            raise RuntimeError("OmniRoute returned a model outside the approved free model pool.")
+        return replace(reply, model=model)
+
+    def _chat(self, messages: list[dict[str, str]], model: str) -> BrainReply:
         if not self.available():
             raise RuntimeError("OmniRoute is not configured.")
 
         body = json.dumps(
             {
-                "model": self.model,
+                "model": model,
                 "messages": messages,
                 "max_tokens": MAX_OUTPUT_TOKENS,
                 "temperature": 0.3,
@@ -367,7 +416,8 @@ class OmniRouteProvider:
         if len(raw) > OMNIROUTE_MAX_RESPONSE_BYTES:
             raise RuntimeError("OmniRoute returned an oversized response.")
         payload = json.loads(raw.decode("utf-8"))
-        return _reply_from_payload(payload, self.name)
+        reply = _reply_from_payload(payload, self.name)
+        return replace(reply, model=reply.model or model)
 
 
 class LocalQwenProvider:
@@ -412,6 +462,7 @@ class BrainManager:
         self.cloud = cloud_provider or CloudflareQwenProvider()
         self.freellmapi = freellmapi_provider or FreeLLMAPIProvider.from_environment()
         self.omniroute = omniroute_provider or OmniRouteProvider.from_environment()
+        self.policy_engine = ModelPolicyEngine()
 
     def respond(
         self,
@@ -419,43 +470,151 @@ class BrainManager:
         history: list[dict[str, str]],
         on_status: Callable[[str], None] | None = None,
         request_metadata: BrainRequestMetadata | None = None,
+        model_selection: ModelSelection | None = None,
     ) -> BrainReply:
-        messages = self.local.brain.messages(command, history)
         metadata = request_metadata or BrainRequestMetadata()
-        remote_attempted = False
-        providers: list[BrainProvider] = []
-        if self.omniroute.enabled:
-            providers.append(self.omniroute)
-            providers.append(self.freellmapi)
-            if self.cloud_enabled:
-                providers.append(self.cloud)
-        else:
-            # Preserve the established Cloudflare -> FreeLLMAPI order when OmniRoute is off.
-            if self.cloud_enabled:
-                providers.append(self.cloud)
-            providers.append(self.freellmapi)
+        privacy = self.policy_engine.classify_privacy(command, metadata.effective_privacy)
+        requested_policy = metadata.task_class
+        if model_selection is not None:
+            levels = {
+                PrivacyLevel.PUBLIC: 0,
+                PrivacyLevel.PRIVATE: 1,
+                PrivacyLevel.LOCAL_ONLY: 2,
+            }
+            if levels[model_selection.privacy] > levels[privacy]:
+                privacy = model_selection.privacy
+            requested_policy = requested_policy or ModelPolicy(model_selection.policy).value
+        # Rebuild the target list at this trust boundary; caller-supplied routes cannot add
+        # arbitrary models or bypass the local-only privacy rule.
+        selection = self.policy_engine.select(
+            command,
+            privacy=privacy,
+            requested_policy=requested_policy,
+            cloudflare_enabled=self.cloud_enabled,
+        )
 
-        for provider in providers:
-            if not provider.available() or not metadata.allows_remote(provider.name):
+        if selection.policy == ModelPolicy.COMPUTER:
+            raise RuntimeError("COMPUTER requests must use the deterministic action dispatcher.")
+        if selection.policy == ModelPolicy.CODING:
+            message = "Repository work is assigned to Codex; FRIDAY chat fallback is disabled."
+            result = replace(selection, selected_backend="codex", selected_model="codex", latency_ms=0.0)
+            return BrainReply(
+                message,
+                provider="codex",
+                model="codex",
+                policy=selection.policy,
+                privacy=selection.privacy,
+                latency_ms=0.0,
+                selection=result,
+            )
+        if selection.policy in {ModelPolicy.VISION, ModelPolicy.VOICE}:
+            raise RuntimeError(f"{selection.policy.value} routing is a placeholder in this phase.")
+
+        messages = self.local.brain.messages(command, history)
+        targets = selection.targets
+        if selection.privacy in {PrivacyLevel.PRIVATE, PrivacyLevel.LOCAL_ONLY}:
+            targets = (ModelTarget("local", self.local_model),)
+
+        started = time.perf_counter()
+        fallback_count = 0
+        for target in targets:
+            provider = self._provider_for(target.backend)
+            if provider is None or not provider.available():
+                fallback_count += 1
+                self._log_policy_attempt(selection, target, fallback_count, "unavailable")
                 continue
             try:
-                remote_attempted = True
-                if on_status:
+                if on_status and not provider.is_local:
                     on_status("THINKING_CLOUD")
-                reply = provider.chat(messages)
-                _log_provider(f"brain={provider.name}")
+                elif on_status:
+                    next_state = (
+                        "THINKING_LOCAL"
+                        if self.local.lifecycle.health()
+                        else "STARTING_LOCAL_BRAIN"
+                    )
+                    on_status(next_state)
+                reply = self._call_provider(provider, target, messages)
+                elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                actual_model = reply.model or target.model or self._provider_model(provider)
+                result = replace(
+                    selection,
+                    selected_backend=provider.name,
+                    selected_model=actual_model,
+                    latency_ms=elapsed_ms,
+                    fallback_count=fallback_count,
+                )
+                reply = replace(
+                    reply,
+                    provider=provider.name,
+                    model=actual_model,
+                    policy=selection.policy,
+                    privacy=selection.privacy,
+                    latency_ms=elapsed_ms,
+                    fallback_count=fallback_count,
+                    selection=result,
+                )
+                self._log_policy_attempt(selection, target, fallback_count, "success", elapsed_ms)
                 return reply
             except Exception as error:
                 http_status = error.code if isinstance(error, HTTPError) else ""
                 suffix = f" http_status={http_status}" if http_status else ""
-                _log_provider(f"brain={provider.name}-failed error={type(error).__name__}{suffix}")
+                fallback_count += 1
+                elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                self._log_policy_attempt(
+                    selection,
+                    target,
+                    fallback_count,
+                    f"failed:{type(error).__name__}{suffix}",
+                    elapsed_ms,
+                )
 
-        if on_status:
-            next_state = "THINKING_LOCAL" if self.local.lifecycle.health() else "STARTING_LOCAL_BRAIN"
-            on_status(next_state)
-        reply = self.local.chat(messages)
-        _log_provider("brain=local-fallback" if remote_attempted else "brain=local")
-        return reply
+        if selection.privacy in {PrivacyLevel.PRIVATE, PrivacyLevel.LOCAL_ONLY}:
+            raise RuntimeError("Private/local-only route error: local Qwen is unavailable.")
+        raise RuntimeError("No approved model route succeeded.")
+
+    @property
+    def local_model(self) -> str:
+        return getattr(self.local.brain, "model", MODEL_NAME)
+
+    def _provider_for(self, backend: str) -> BrainProvider | None:
+        return {
+            "omniroute": self.omniroute,
+            "freellmapi": self.freellmapi,
+            "cloudflare": self.cloud if self.cloud_enabled else None,
+            "local": self.local,
+        }.get(backend)
+
+    @staticmethod
+    def _provider_model(provider: BrainProvider) -> str | None:
+        return getattr(provider, "model", None)
+
+    @staticmethod
+    def _call_provider(
+        provider: BrainProvider, target: ModelTarget, messages: list[dict[str, str]]
+    ) -> BrainReply:
+        if target.backend == "omniroute":
+            send_model = getattr(provider, "chat_with_model", None)
+            if not callable(send_model) or target.model is None:
+                raise RuntimeError("OmniRoute explicit-model routing is unavailable.")
+            return send_model(messages, target.model)
+        return provider.chat(messages)
+
+    @staticmethod
+    def _log_policy_attempt(
+        selection: ModelSelection,
+        target: ModelTarget,
+        fallback_count: int,
+        outcome: str,
+        latency_ms: float | None = None,
+    ) -> None:
+        elapsed = "unknown" if latency_ms is None else f"{latency_ms:.1f}"
+        model = target.model or "provider-configured"
+        _log_provider(
+            f"policy={selection.policy.value} privacy={selection.privacy.value} "
+            f"backend={target.backend} model={model} latency_ms={elapsed} "
+            f"success={outcome == 'success'} fallback_count={fallback_count} "
+            f"outcome={outcome}"
+        )
 
     def close(self) -> None:
         self.local.close()
@@ -474,7 +633,16 @@ def _reply_from_payload(payload: object, provider: str) -> BrainReply:
     usage = payload.get("usage", {})
     if not isinstance(usage, dict):
         usage = {}
-    return BrainReply(text, usage.get("prompt_tokens"), usage.get("completion_tokens"), provider)
+    model = payload.get("model")
+    if not isinstance(model, str) or not model.strip():
+        model = None
+    return BrainReply(
+        text,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        provider,
+        model=model,
+    )
 
 
 def _log_provider(message: str) -> None:
