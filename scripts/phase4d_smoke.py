@@ -30,6 +30,7 @@ from friday.brain_manager import (  # noqa: E402
     CloudflareQwenProvider,
     FreeLLMAPIProvider,
     OmniRouteProvider,
+    _reply_from_payload,
 )
 from friday.capabilities.registry import Risk  # noqa: E402
 from friday.core import FridayCore  # noqa: E402
@@ -573,6 +574,149 @@ def run_mocks() -> dict[str, str]:
     assert all(result == "PASS" for result in results.values())
 
 
+def run_phase4d_2_mocks() -> None:
+    """Run only the targeted Phase 4D.2 routing and alias regressions."""
+    results: dict[str, str] = {}
+    omni_key = secrets.token_urlsafe(24)
+    free_key = secrets.token_urlsafe(24)
+
+    with tempfile.TemporaryDirectory(prefix="friday-phase4d-2-") as temp_dir:
+        log_path = Path(temp_dir) / "route.log"
+        with PatchedLogs(log_path):
+            # COMPUTER actions stay deterministic and make no model calls.
+            with MockGateway(omni_key) as omni_gateway, MockGateway(free_key) as free_gateway:
+                local = FakeLocalProvider()
+                cloud = FakeCloudflareProvider()
+                systemone = CountingSystemOneManager()
+                manager = manager_for(
+                    local,
+                    omni=omni_for(omni_gateway, omni_key),
+                    free=free_for(free_gateway, free_key),
+                    cloud=cloud,
+                    cloud_enabled=True,
+                )
+                core = core_for(manager, systemone)
+                core._computer = FakeComputerController()  # type: ignore[assignment]
+                _, _, decision = core.respond("open notepad")
+                assert decision.route == Route.COMPUTER
+                assert omni_gateway.posts == free_gateway.posts == 0
+                assert cloud.calls == local.calls == systemone.calls == 0
+                core.close()
+            results["computer_zero_llm"] = "PASS"
+
+            # PRIVATE requests use the local provider without any remote calls.
+            with MockGateway(omni_key) as omni_gateway, MockGateway(free_key) as free_gateway:
+                local = FakeLocalProvider()
+                cloud = FakeCloudflareProvider()
+                manager = manager_for(
+                    local,
+                    omni=omni_for(omni_gateway, omni_key),
+                    free=free_for(free_gateway, free_key),
+                    cloud=cloud,
+                    cloud_enabled=True,
+                )
+                core = core_for(manager)
+                core.respond(
+                    "Summarize my private financial document.",
+                    request_metadata=BrainRequestMetadata(privacy="private"),
+                )
+                selection = core.last_model_selection
+                assert selection is not None and selection.policy == ModelPolicy.PRIVATE
+                assert local.calls == 1
+                assert omni_gateway.posts == free_gateway.posts == cloud.calls == 0
+                core.close()
+            results["private_remote_calls_zero"] = "PASS"
+
+            # FAST preserves its bounded OmniRoute -> FreeLLMAPI fallback chain.
+            with MockGateway(omni_key, mode="failure") as omni_gateway, MockGateway(
+                free_key
+            ) as free_gateway:
+                local = FakeLocalProvider()
+                manager = manager_for(
+                    local,
+                    omni=omni_for(omni_gateway, omni_key),
+                    free=free_for(free_gateway, free_key),
+                )
+                core = core_for(manager)
+                core.respond("Rewrite clearly: The app run very fast.")
+                selection = core.last_model_selection
+                assert selection is not None and selection.policy == ModelPolicy.FAST
+                assert omni_gateway.models == [FAST_MODEL_DEFAULT, FAST_FALLBACK_MODEL_DEFAULT]
+                assert free_gateway.posts == 1 and local.calls == 0
+                assert selection.selected_backend == "freellmapi" and selection.fallback_count == 2
+                core.close()
+            results["fast_fallback_chain"] = "PASS"
+
+            # SMART preserves its bounded OmniRoute -> FreeLLMAPI -> Cloudflare chain.
+            with MockGateway(omni_key, mode="failure") as omni_gateway, MockGateway(
+                free_key, mode="failure"
+            ) as free_gateway:
+                local = FakeLocalProvider()
+                cloud = FakeCloudflareProvider()
+                manager = manager_for(
+                    local,
+                    omni=omni_for(omni_gateway, omni_key),
+                    free=free_for(free_gateway, free_key),
+                    cloud=cloud,
+                    cloud_enabled=True,
+                )
+                core = core_for(manager)
+                core.respond("Compare two simple software architecture options.")
+                selection = core.last_model_selection
+                assert selection is not None and selection.policy == ModelPolicy.SMART
+                assert omni_gateway.models == [SMART_MODEL_DEFAULT, SMART_FALLBACK_MODEL_DEFAULT]
+                assert free_gateway.posts == cloud.calls == 1 and local.calls == 0
+                assert selection.selected_backend == "cloudflare" and selection.fallback_count == 3
+                core.close()
+            results["smart_fallback_chain"] = "PASS"
+
+            # Malformed assistant responses continue to fail closed.
+            for payload in (
+                {},
+                {"choices": []},
+                {"choices": [{"message": {"content": "  "}}]},
+            ):
+                try:
+                    _reply_from_payload(payload, "omniroute")
+                except RuntimeError:
+                    continue
+                raise AssertionError("Malformed OmniRoute response was accepted.")
+            results["malformed_response_rejected"] = "PASS"
+
+            # Only exact configured model IDs and their approved bare aliases pass.
+            prompt = [{"role": "user", "content": "hello"}]
+            for returned_model, expected in (
+                ("gemini-3-flash-preview", "bare_alias_accepted"),
+                (SMART_MODEL_DEFAULT, "qualified_id_accepted"),
+            ):
+                with MockGateway(omni_key, response_model=returned_model) as gateway:
+                    provider = omni_for(gateway, omni_key)
+                    reply = provider.chat_with_model(prompt, SMART_MODEL_DEFAULT)
+                    assert reply.model == SMART_MODEL_DEFAULT and gateway.posts == 1
+                results[expected] = "PASS"
+
+            for returned_model in (
+                "evil/gemini-3-flash-preview",
+                "unknown/gemini-3-flash-preview",
+                "other/model",
+            ):
+                with MockGateway(omni_key, response_model=returned_model) as gateway:
+                    provider = omni_for(gateway, omni_key)
+                    try:
+                        provider.chat_with_model(prompt, SMART_MODEL_DEFAULT)
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise AssertionError(
+                            f"Unauthorized returned model was accepted: {returned_model}"
+                        )
+                    assert gateway.posts == 1
+            results["arbitrary_alias_rejected"] = "PASS"
+
+    print(json.dumps({"phase": "4D.2", "mode": "focused-mock", "results": results}, sort_keys=True))
+    assert all(result == "PASS" for result in results.values())
+
+
 def run_real() -> None:
     results: list[dict[str, Any]] = []
     profiles = (
@@ -654,7 +798,9 @@ def run_real() -> None:
 
 
 if __name__ == "__main__":
-    if "--real-only" in sys.argv:
+    if "--phase4d-2-mocks" in sys.argv:
+        run_phase4d_2_mocks()
+    elif "--real-only" in sys.argv:
         run_real()
     else:
         run_mocks()

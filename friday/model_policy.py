@@ -37,6 +37,23 @@ APPROVED_FREE_GEMINI_MODELS = frozenset(
         "gemini/gemini-2.5-flash-lite",
     }
 )
+APPROVED_FREE_GEMINI_MODEL_RESPONSE_IDS = {
+    model: frozenset({model, model.rsplit("/", 1)[-1]})
+    for model in APPROVED_FREE_GEMINI_MODELS
+}
+
+
+def is_approved_free_gemini_model_response(
+    requested_model: str, returned_model: str
+) -> bool:
+    """Accept only the exact configured model ID and its approved bare alias."""
+    if not isinstance(requested_model, str) or not isinstance(returned_model, str):
+        return False
+    return returned_model in APPROVED_FREE_GEMINI_MODEL_RESPONSE_IDS.get(
+        requested_model, frozenset()
+    )
+
+
 FAST_MODEL_DEFAULT = "gemini/gemini-3.1-flash-lite"
 FAST_FALLBACK_MODEL_DEFAULT = "gemini/gemini-2.5-flash-lite"
 SMART_MODEL_DEFAULT = "gemini/gemini-3-flash-preview"

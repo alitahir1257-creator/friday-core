@@ -29,6 +29,7 @@ from friday.model_policy import (
     ModelSelection,
     ModelTarget,
     PrivacyLevel,
+    is_approved_free_gemini_model_response,
 )
 from friday.profile import AssistantProfile
 
@@ -378,9 +379,9 @@ class OmniRouteProvider:
 
     def _approved_reply(self, messages: list[dict[str, str]], model: str) -> BrainReply:
         reply = self._chat(messages, model)
-        returned_name = reply.model.rsplit("/", 1)[-1] if reply.model else None
-        requested_name = model.rsplit("/", 1)[-1]
-        if returned_name is not None and returned_name != requested_name:
+        if reply.model is not None and not is_approved_free_gemini_model_response(
+            model, reply.model
+        ):
             raise RuntimeError("OmniRoute returned a model outside the approved free model pool.")
         return replace(reply, model=model)
 
