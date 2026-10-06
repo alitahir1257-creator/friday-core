@@ -4,3 +4,77 @@ friday-core.log
 .venv/
 .browser-profile/
 *.sqlite3*
+
+# Local environment files; keep safe templates trackable.
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Local dependencies and Python environments/caches.
+node_modules/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Local databases and their sidecar files.
+*.db
+*.sqlite
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Browser profiles and credential-bearing browser data.
+browser-profile/
+.chrome-profile/
+.firefox-profile/
+chrome-profile/
+firefox-profile/
+**/Cookies
+**/Cookies-journal
+**/Login Data
+**/Login Data-journal
+**/Web Data
+**/Local State
+
+# Downloaded model weights and local model/embedding caches.
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+.cache/
+.model-cache/
+model-cache/
+model_cache/
+models--*/
+**/huggingface/hub/
+
+# Obsidian vault metadata and local trash.
+.obsidian/
+.trash/
+
+# Runtime logs, temporary phase runs, and OS/editor artifacts.
+*.log
+*.log.*
+phase7c2-*/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+*.orig
+*.rej
