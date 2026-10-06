@@ -10,10 +10,11 @@ from friday.research.models import (
     SearchResult,
 )
 from friday.research.planner import ResearchPlanner, ResearchQueryError
-from friday.research.search import SearchProvider, SearchProviderError, SearXNGSearchProvider
+from friday.research.search import BrowserSearchProvider, SearchProvider, SearchProviderError, SearXNGSearchProvider
 
 __all__ = [
     "ClaimKind",
+    "BrowserSearchProvider",
     "ResearchEngine",
     "ResearchPlan",
     "ResearchPlanner",

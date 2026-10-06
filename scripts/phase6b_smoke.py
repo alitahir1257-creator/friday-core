@@ -623,12 +623,16 @@ def run() -> None:
             coding_core.close()
 
             research_brain = _BrainSpy()
-            research_core = FridayCore(AssistantProfile(), router=create_router(), brain_manager=research_brain)
-            research_response, _, _ = research_core.respond("Research the latest browser testing tools and cite sources.")
-            assert "SEARCH_CONFIGURATION_REQUIRED" in research_response
+            with patch.dict("os.environ", {
+                "FRIDAY_RESEARCH_SEARXNG_URL": "",
+                "FRIDAY_RESEARCH_BROWSER_SEARCH_ENGINE": "unsupported",
+            }):
+                research_core = FridayCore(AssistantProfile(), router=create_router(), brain_manager=research_brain)
+                research_response, _, _ = research_core.respond("Research the latest browser testing tools and cite sources.")
+                research_core.close()
+            assert "SEARCH_UNAVAILABLE" in research_response
             assert research_brain.calls == 0 and research_core.planner.model_calls == 0
             assert research_core.current_task_run.status == TaskStatus.SUCCEEDED
-            research_core.close()
 
             # W. Current-task state exposes the executing step without arguments or goal text.
             state_registry = ToolRegistry()

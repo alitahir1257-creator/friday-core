@@ -27,10 +27,17 @@ from friday.research.models import (
 )
 from friday.research.planner import ResearchPlanner, ResearchQueryError
 from friday.research.quality import classify_source, is_duplicate, rank_search_results, source_signals
-from friday.research.search import SearchProvider, SearchProviderError, configured_search_providers
+from friday.research.search import MAX_SEARCH_RESULTS, SearchProvider, SearchProviderError, configured_search_providers
 from friday.research.store import ResearchEvidenceStore
 from friday.research.synthesis import ResearchSynthesizer
 from friday.research.urls import UnsafeResearchURL, domain_of, normalize_url
+
+
+_NORMAL_SEARCH_FAILURES = frozenset({"SEARCH_CHALLENGE", "SEARCH_TIMEOUT", "SEARCH_UNAVAILABLE", "NO_RESULTS"})
+
+
+def _normalize_search_failure(code: str) -> str:
+    return code if code in _NORMAL_SEARCH_FAILURES else "SEARCH_UNAVAILABLE"
 
 
 class ResearchEngine:
@@ -66,6 +73,8 @@ class ResearchEngine:
         run = self.get_run(run_id)
         if run is None or run.status in {ResearchStatus.COMPLETE, ResearchStatus.INSUFFICIENT_EVIDENCE,
                                          ResearchStatus.SEARCH_CONFIGURATION_REQUIRED, ResearchStatus.SEARCH_UNAVAILABLE,
+                                         ResearchStatus.SEARCH_CHALLENGE, ResearchStatus.SEARCH_TIMEOUT,
+                                         ResearchStatus.NO_RESULTS,
                                          ResearchStatus.CANCELLED, ResearchStatus.FAILED}:
             return False
         run.cancel()
@@ -85,20 +94,26 @@ class ResearchEngine:
         if not safe_query:
             raise SearchProviderError("PRIVATE_QUERY_BLOCKED", "No safe public query could be separated from the request.")
         clean_query = self.planner._minimal(safe_query)
+        last_error: SearchProviderError | None = None
         for provider in self.search_providers[:4]:
             try:
                 rows = provider.search(clean_query, max_results, timeout_seconds=timeout_seconds)
-            except SearchProviderError:
+            except SearchProviderError as error:
+                last_error = error
                 continue
             except Exception:
+                last_error = SearchProviderError("SEARCH_UNAVAILABLE")
                 continue
-            if rows:
-                return rank_search_results(
-                    clean_query, rows, limit=max_results, fixture_hosts=self.fetcher.fixture_hosts,
-                )
+            ranked = rank_search_results(
+                clean_query, rows, limit=max_results, fixture_hosts=self.fetcher.fixture_hosts,
+            )
+            if ranked:
+                return ranked
+            last_error = SearchProviderError("NO_RESULTS")
         if not self.search_providers:
             raise SearchProviderError("SEARCH_CONFIGURATION_REQUIRED", "Set FRIDAY_RESEARCH_SEARXNG_URL to use search.")
-        raise SearchProviderError("SEARCH_UNAVAILABLE")
+        error = last_error or SearchProviderError("NO_RESULTS")
+        raise SearchProviderError(_normalize_search_failure(error.code)) from None
 
     def fetch(self, url: str, *, timeout_seconds: float | None = None) -> ExtractedPage:
         fetched = self.fetcher.fetch(url, timeout_seconds=timeout_seconds)
@@ -184,7 +199,7 @@ class ResearchEngine:
             return run
 
         selected: list[SearchResult] = []
-        search_call_count = 0
+        last_search_error: SearchProviderError | None = None
         if source_urls:
             if privacy != "public" and not plan.sanitized:
                 run.status = ResearchStatus.INSUFFICIENT_EVIDENCE
@@ -208,51 +223,68 @@ class ResearchEngine:
                 run.answer = "LIVE_SEARCH_CONFIGURATION_REQUIRED: set FRIDAY_RESEARCH_SEARXNG_URL to a zero-cost SearXNG instance."
                 self._emit(run, "research_completed", status=run.status.value)
                 return run
-            for query_index, query in enumerate(plan.search_queries, 1):
+            for query_index, query in enumerate(plan.search_queries[:plan.max_search_queries], 1):
+                candidate_limit = MAX_SEARCH_RESULTS - len(selected)
+                if candidate_limit <= 0:
+                    break
                 if is_cancelled():
                     return self._cancel_run(run)
                 if timed_out():
-                    run.error_code = "TIME_BUDGET_EXHAUSTED"
+                    run.error_code = "SEARCH_TIMEOUT"
+                    last_search_error = SearchProviderError("SEARCH_TIMEOUT")
                     break
                 self._emit(run, "search_started", index=query_index, total=len(plan.search_queries))
                 found = False
-                for provider in self.search_providers[:plan.max_search_queries]:
-                    if search_call_count >= plan.max_search_queries:
-                        break
+                for provider in self.search_providers[:4]:
                     if is_cancelled():
                         return self._cancel_run(run)
                     if timed_out():
+                        last_search_error = SearchProviderError("SEARCH_TIMEOUT")
+                        run.error_code = last_search_error.code
                         break
                     remaining = max(0.1, deadline - perf_counter())
-                    search_call_count += 1
                     try:
-                        rows = provider.search(query, plan.max_sources, timeout_seconds=min(10.0, remaining))
+                        rows = provider.search(query, candidate_limit, timeout_seconds=min(10.0, remaining))
                     except SearchProviderError as error:
+                        last_search_error = error
                         run.error_code = error.code
                         continue
                     except Exception:
-                        run.error_code = "SEARCH_PROVIDER_ERROR"
+                        last_search_error = SearchProviderError("SEARCH_UNAVAILABLE")
+                        run.error_code = last_search_error.code
                         continue
                     normalized = rank_search_results(
-                        query, rows, limit=plan.max_sources,
+                        query, rows, limit=candidate_limit,
                         preferred_domains=plan.preferred_domains,
                         excluded_domains=plan.excluded_domains,
                         freshness=plan.freshness,
                         fixture_hosts=self.fetcher.fixture_hosts,
                     )
                     if normalized:
-                        selected.extend(normalized)
+                        selected.extend(normalized[:candidate_limit])
                         found = True
+                        run.error_code = None
+                        last_search_error = None
                         break
+                    last_search_error = SearchProviderError("NO_RESULTS")
+                    run.error_code = last_search_error.code
                 self._emit(run, "search_completed", index=query_index, total=len(plan.search_queries), status="RESULTS" if found else "EMPTY_OR_FAILED")
                 # One deterministic query is the normal path; future query expansion remains capped at four.
-                if found and query_index >= len(plan.search_queries):
+                if len(selected) >= MAX_SEARCH_RESULTS or (found and query_index >= len(plan.search_queries)):
                     break
         if is_cancelled():
             return self._cancel_run(run)
-        if not selected and run.error_code and run.error_code.startswith("SEARCH_"):
-            run.status = ResearchStatus.SEARCH_UNAVAILABLE
-            run.answer = "INSUFFICIENT_EVIDENCE: configured search providers failed or returned no usable results."
+        if not selected and not source_urls:
+            code = _normalize_search_failure(last_search_error.code) if last_search_error is not None else "NO_RESULTS"
+            status = {
+                "SEARCH_CHALLENGE": ResearchStatus.SEARCH_CHALLENGE,
+                "SEARCH_TIMEOUT": ResearchStatus.SEARCH_TIMEOUT,
+                "SEARCH_UNAVAILABLE": ResearchStatus.SEARCH_UNAVAILABLE,
+                "NO_RESULTS": ResearchStatus.NO_RESULTS,
+            }[code]
+            run.status = status
+            run.error_code = code
+            run.answer = f"{code}: no search results were available; no sources were fetched."
             self._emit(run, "research_completed", status=run.status.value)
             return run
 
@@ -371,7 +403,13 @@ class ResearchEngine:
             lines.append("LIVE_SEARCH_CONFIGURATION_REQUIRED: Configure a zero-cost SearXNG endpoint with FRIDAY_RESEARCH_SEARXNG_URL.")
         if run.status == ResearchStatus.CANCELLED:
             lines.append("Research was cancelled before remaining searches, fetches, or synthesis could start.")
-        if run.status == ResearchStatus.INSUFFICIENT_EVIDENCE:
+        if run.status in {
+            ResearchStatus.INSUFFICIENT_EVIDENCE,
+            ResearchStatus.SEARCH_CHALLENGE,
+            ResearchStatus.SEARCH_TIMEOUT,
+            ResearchStatus.NO_RESULTS,
+            ResearchStatus.SEARCH_UNAVAILABLE,
+        }:
             lines.append(run.answer or "INSUFFICIENT_EVIDENCE")
         if run.status in {ResearchStatus.COMPLETE, ResearchStatus.INSUFFICIENT_EVIDENCE}:
             for claim in run.claims:

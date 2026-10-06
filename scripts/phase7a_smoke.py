@@ -35,7 +35,13 @@ from friday.research.models import (  # noqa: E402
 )
 from friday.research.planner import ResearchPlanner  # noqa: E402
 from friday.research.quality import is_duplicate  # noqa: E402
-from friday.research.search import SearXNGSearchProvider, configured_search_providers  # noqa: E402
+from friday.research.search import (  # noqa: E402
+    BrowserSearchProvider,
+    SearchProviderError,
+    SearXNGSearchProvider,
+    _normalize_browser_result_url,
+    configured_search_providers,
+)
 from friday.research.store import ResearchEvidenceStore  # noqa: E402
 from friday.research.synthesis import ResearchSynthesizer, validate_claims  # noqa: E402
 from friday.research.urls import UnsafeResearchURL  # noqa: E402
@@ -144,14 +150,30 @@ class FakeProvider:
         self.fail = fail
         self.on_search = on_search
         self.queries: list[str] = []
+        self.limits: list[int] = []
 
     def search(self, query, limit=8, *, timeout_seconds=10):
         self.queries.append(query)
+        self.limits.append(limit)
         if self.on_search:
             self.on_search()
         if self.fail:
             raise RuntimeError("fixture provider failure")
         return list(self.rows[:limit])
+
+
+class FixtureBrowserSearchProvider(BrowserSearchProvider):
+    def __init__(self, rows=(), *, error_code=None, engine="duckduckgo"):
+        super().__init__(engine)
+        self.rows = list(rows)
+        self.error_code = error_code
+        self.queries: list[str] = []
+
+    def _search_page(self, query, limit, timeout_seconds):
+        self.queries.append(query)
+        if self.error_code:
+            raise SearchProviderError(self.error_code)
+        return self.rows[:limit]
 
 
 class FakeSynthesizer:
@@ -250,9 +272,39 @@ def main() -> None:
         normalized = SearXNGSearchProvider("https://search.example", opener=MockOpener()).search("python documentation")
         search_ms = (time.perf_counter() - search_started) * 1000
         check("A normalized title, URL, snippet, source, rank", len(normalized) == 1 and normalized[0].title == "Official & Python" and normalized[0].url == "https://docs.python.org/3/" and normalized[0].snippet == "Documentation result" and normalized[0].source == "searxng" and normalized[0].rank == 1)
-        check("A invalid optional endpoint stays disabled", configured_search_providers({"FRIDAY_RESEARCH_SEARXNG_URL": "file:///etc/passwd"}) == ())
+        configured = configured_search_providers({
+            "FRIDAY_RESEARCH_SEARXNG_URL": "https://search.example",
+            "FRIDAY_RESEARCH_BROWSER_SEARCH_ENGINE": "duckduckgo",
+        })
+        check("A healthy configured SearXNG is first", [item.name for item in configured] == ["searxng", "browser"])
+        fallback = configured_search_providers({})
+        check("A SearXNG unset selects the browser fallback", [item.name for item in fallback] == ["browser"] and fallback[0].configured)
+        invalid_optional = configured_search_providers({"FRIDAY_RESEARCH_SEARXNG_URL": "file:///etc/passwd"})
+        check("A invalid optional SearXNG is skipped", [item.name for item in invalid_optional] == ["browser"])
+        check("A browser search strips tracking and unwraps result URLs", _normalize_browser_result_url(
+            "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.python.org%2F3%2F%3Futm_source%3Dddg%26v%3D1&rut=x",
+            "duckduckgo", "https://html.duckduckgo.com/html/?q=python",
+        ) == "https://docs.python.org/3/?v=1")
         unconfigured = ResearchEngine(search_providers=(), fetcher=fixture.fetcher).run("Research bounded fixture evidence")
-        check("A no implicit paid/public provider", unconfigured.status == ResearchStatus.SEARCH_CONFIGURATION_REQUIRED)
+        check("A explicitly empty provider list reports configuration required", unconfigured.status == ResearchStatus.SEARCH_CONFIGURATION_REQUIRED)
+        browser_fallback = FixtureBrowserSearchProvider([result(base + "/official")])
+        preferred = ResearchEngine(
+            search_providers=(SearXNGSearchProvider("https://search.example", opener=MockOpener()), browser_fallback),
+            fetcher=fixture.fetcher,
+        ).search("Research python documentation")
+        check("A healthy SearXNG wins before browser fallback", bool(preferred) and not browser_fallback.queries)
+        challenge_run = ResearchEngine(
+            search_providers=(FixtureBrowserSearchProvider(error_code="SEARCH_CHALLENGE"),),
+            fetcher=fixture.fetcher,
+        ).run("Research bounded fixture evidence")
+        timeout_run = ResearchEngine(
+            search_providers=(FixtureBrowserSearchProvider(error_code="SEARCH_TIMEOUT"),),
+            fetcher=fixture.fetcher,
+        ).run("Research bounded fixture evidence")
+        empty_run = ResearchEngine(
+            search_providers=(FixtureBrowserSearchProvider(),), fetcher=fixture.fetcher,
+        ).run("Research bounded fixture evidence")
+        check("A browser challenge, timeout, and no-results statuses normalize", challenge_run.status == ResearchStatus.SEARCH_CHALLENGE and timeout_run.status == ResearchStatus.SEARCH_TIMEOUT and empty_run.status == ResearchStatus.NO_RESULTS)
 
         # B, C, F, G. Static extraction, bounded redirect, malformed HTML, and body-size limit.
         fetch_started = time.perf_counter()
@@ -395,7 +447,16 @@ def main() -> None:
             search_providers=(source_budget_provider,), fetcher=fixture.fetcher,
             synthesizer=FakeSynthesizer(), enable_browser_fallback=False,
         ).run("Compare bounded source evidence", max_sources=2)
-        check("L query budget", invalid_plan_rejected and len(query_counter.queries) == 4)
+        check("L query budget", invalid_plan_rejected and len(query_counter.queries) == 4 and query_counter.limits == [8] * 4)
+        candidate_budget_provider = FakeProvider([
+            result(base + path, rank=index)
+            for index, path in enumerate(("/official", "/news", "/duplicate", "/malformed", "/captcha", "/missing"), 1)
+        ])
+        ResearchEngine(
+            search_providers=(candidate_budget_provider,), fetcher=fixture.fetcher,
+            synthesizer=FakeSynthesizer(), planner=FixedPlanner(), enable_browser_fallback=False,
+        ).run("bounded topic", max_sources=1)
+        check("L run-wide candidate budget", len(candidate_budget_provider.queries) == 2 and candidate_budget_provider.limits == [8, 2])
         check("L source budget and independent-source threshold", len(source_budget.sources) == 2 and source_budget.status == ResearchStatus.INSUFFICIENT_EVIDENCE)
 
         # M. Cancellation during search prevents all later fetches and synthesis.
@@ -421,7 +482,7 @@ def main() -> None:
             search_providers=(FakeProvider([], fail=True),), fetcher=fixture.fetcher,
             synthesizer=FakeSynthesizer(), enable_browser_fallback=False,
         ).run("Research bounded research evidence")
-        check("N normalized provider error", total_failure.status == ResearchStatus.SEARCH_UNAVAILABLE and total_failure.error_code == "SEARCH_PROVIDER_ERROR")
+        check("N normalized provider error", total_failure.status == ResearchStatus.SEARCH_UNAVAILABLE and total_failure.error_code == "SEARCH_UNAVAILABLE")
         failure_engine = ResearchEngine(
             search_providers=(FakeProvider([result(base + "/missing", title="bounded research evidence", rank=1), result(base + "/official", rank=2)]),),
             fetcher=fixture.fetcher, synthesizer=FakeSynthesizer(), enable_browser_fallback=False,
@@ -431,7 +492,7 @@ def main() -> None:
 
         # P. No usable result is an explicit insufficient state.
         empty = ResearchEngine(search_providers=(FakeProvider([]),), fetcher=fixture.fetcher, synthesizer=FakeSynthesizer()).run("Research an unknown topic")
-        check("P INSUFFICIENT EVIDENCE", empty.status == ResearchStatus.INSUFFICIENT_EVIDENCE and "INSUFFICIENT_EVIDENCE" in empty.answer)
+        check("P NO_RESULTS", empty.status == ResearchStatus.NO_RESULTS and "NO_RESULTS" in empty.answer)
         blocked_page = ResearchEngine(
             search_providers=(FakeProvider([result(base + "/captcha", title="Captcha verification page", snippet="verify you are human")]),),
             fetcher=fixture.fetcher, synthesizer=FakeSynthesizer(), enable_browser_fallback=False,
@@ -458,8 +519,9 @@ def main() -> None:
         check("Q LOCAL_ONLY has no remote query", local_only.status == ResearchStatus.INSUFFICIENT_EVIDENCE and not local_only_provider.queries)
 
         # R. Registry invocation carries research.run through its normal tool path.
+        browser_tool_provider = FixtureBrowserSearchProvider([result(base + "/official")])
         tool_engine = ResearchEngine(
-            search_providers=(FakeProvider([result(base + "/official")]),), fetcher=fixture.fetcher,
+            search_providers=(browser_tool_provider,), fetcher=fixture.fetcher,
             synthesizer=FakeSynthesizer(), enable_browser_fallback=False,
         )
         registry = ToolRegistry()
@@ -468,7 +530,7 @@ def main() -> None:
             "research.run", {"question": "Research bounded fixture evidence"},
             caller="phase7a_smoke", privacy="public",
         )
-        check("R RESEARCH TOOL", tool_result.success and "SOURCE_DERIVED_FACT" in tool_result.summary and "[S1]" in tool_result.summary)
+        check("R RESEARCH TOOL", tool_result.success and "SOURCE_DERIVED_FACT" in tool_result.summary and "[S1]" in tool_result.summary and len(browser_tool_provider.queries) == 1)
 
         # S/T. Existing Planner and AutomationRunner use the same registered ToolRegistry capability.
         planner = Planner(None, registry, ModelPolicyEngine())
