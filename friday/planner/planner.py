@@ -22,6 +22,15 @@ _MULTI_STEP = re.compile(
     r"navigate|summari[sz]e|save|check|close|send|publish)\b",
     re.IGNORECASE | re.DOTALL,
 )
+_DOCUMENT_EXTENSION = re.compile(r"\.(?:pdf|docx|xlsx|pptx)\b", re.IGNORECASE)
+_DOCUMENT_NOUN = re.compile(
+    r"\b(?:documents?|files?|agreements?|contracts?|spreadsheets?|workbooks?|presentations?|slides?|pdf|docx|xlsx|pptx)\b",
+    re.IGNORECASE,
+)
+_DOCUMENT_ACTION = re.compile(
+    r"\b(?:open|read|inspect|search|find|summari[sz]e|compare|analy[sz]e|extract|answer|review|list|show|calculate)\b",
+    re.IGNORECASE,
+)
 _STEP_FIELDS = {
     "id", "description", "profile", "capability", "preferred_tool", "arguments",
     "dependencies", "risk_hint", "verification",
@@ -31,6 +40,12 @@ _STEP_FIELDS = {
 def is_multi_step_request(goal: str) -> bool:
     """Use explicit action sequences as the planner boundary; simple asks stay direct."""
     return bool(_MULTI_STEP.search(goal))
+
+
+def is_document_request(goal: str) -> bool:
+    return isinstance(goal, str) and bool(
+        _DOCUMENT_EXTENSION.search(goal) or (_DOCUMENT_ACTION.search(goal) and _DOCUMENT_NOUN.search(goal))
+    )
 
 
 def _schema_contract(schema: dict) -> dict:
@@ -158,6 +173,7 @@ class Planner:
             and research_tool.enabled
             and self.policy_engine.requires_research(goal)
             and not is_multi_step_request(goal)
+            and not is_document_request(goal)
         ):
             privacy_policy = ModelPolicy.PRIVATE if privacy != "public" else ModelPolicy.RESEARCH
             self.last_selection = self.policy_engine.select(

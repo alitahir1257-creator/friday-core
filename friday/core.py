@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
+from pathlib import Path
 import re
 import time
 
@@ -24,9 +26,13 @@ from friday.planner import (
     TaskResult,
     WorkerExecutor,
     WorkerProfile,
+    is_document_request,
     is_multi_step_request,
 )
+from friday.connectors.local_files import ApprovedRoot, LocalFilesConnector
+from friday.documents import DocumentManager
 from friday.tools.adapters import register_computer_tools, register_knowledge_tools
+from friday.tools.documents import register_document_tools
 from friday.tools.research import register_research_tools
 from friday.research.engine import ResearchEngine
 from friday.tools.models import ToolResult
@@ -60,8 +66,20 @@ class FridayCore:
         self.tool_registry = ToolRegistry()
         register_computer_tools(self.tool_registry, self._computer_controller)
         register_knowledge_tools(self.tool_registry, getattr(self._brain_manager, "unified", None))
+        configured_roots = getattr(profile, "document_roots", (r"D:\FRIDAY\documents",))
+        public_roots = getattr(profile, "public_document_roots", ())
+        approved_roots = tuple(
+            ApprovedRoot(root, namespace="friday", privacy=privacy)
+            for privacy, paths in (("private", configured_roots), ("public", public_roots))
+            for root in paths if Path(root).is_dir()
+        )
+        self.document_files = LocalFilesConnector(
+            approved_roots, enabled=bool(approved_roots), max_file_bytes=20 * 1024 * 1024,
+        )
         self.research_engine = research_engine or ResearchEngine(self._brain_manager)
         register_research_tools(self.tool_registry, self.research_engine)
+        self.documents = DocumentManager(self.document_files, self._brain_manager, self.research_engine)
+        register_document_tools(self.tool_registry, self.documents)
         self.mcp = MCPClientManager(self.tool_registry)
         self.planner = planner or Planner(self._brain_manager, self.tool_registry, self._model_policy_engine)
         self.worker_executor = worker_executor or WorkerExecutor(
@@ -103,6 +121,15 @@ class FridayCore:
             request_metadata.effective_privacy if request_metadata is not None else None
         )
         privacy = self._model_policy_engine.classify_privacy(command, requested_privacy)
+        document_request = is_document_request(command)
+        explicit_public_document = (
+            request_metadata is not None
+            and request_metadata.sensitivity == "public"
+            and request_metadata.privacy == "public"
+            and request_metadata.task_class != ModelPolicy.PRIVATE.value
+        )
+        if document_request and privacy == PrivacyLevel.PUBLIC and not explicit_public_document:
+            privacy = PrivacyLevel.PRIVATE
 
         selection = self._model_policy_engine.select(
             command,
@@ -111,15 +138,18 @@ class FridayCore:
             requested_policy=request_metadata.task_class if request_metadata is not None else None,
             cloudflare_enabled=bool(getattr(self._brain_manager, "cloud_enabled", False)),
         )
-        multi_step = is_multi_step_request(command)
+        multi_step = is_multi_step_request(command) or document_request
         if decision.route == Route.COMPUTER:
-            deterministic_plan = self._computer_controller().planner.plan(command)
+            deterministic_plan = self._deterministic_computer_plan(command)
             multi_step = multi_step or bool(
                 deterministic_plan is not None and len(deterministic_plan.actions) > 1
             )
 
         namespace = request_metadata.memory_namespace if request_metadata is not None else "global"
         if selection.policy == ModelPolicy.CODING:
+            decision = RoutingDecision(
+                Route.CODING, 1.0, selection.reason, "model_policy",
+            )
             handoff = self.planner.coding_handoff(command, privacy=privacy.value, namespace=namespace)
             result = self.worker_executor.execute(handoff)
             self.current_task_run = self.worker_executor.current_task
@@ -193,6 +223,11 @@ class FridayCore:
             self._last_model_selection = self.planner.last_selection or planning_selection
             if research_requested and not multi_step and last_result is not None:
                 return last_result.summary, None, decision
+            if document_request and last_result is not None and last_result.success and last_result.tool_name.startswith("documents."):
+                rendered = json.dumps(last_result.structured_data, ensure_ascii=False, default=str)
+                if len(rendered) > 20_000:
+                    rendered = rendered[:20_000] + "\n[Document tool output truncated at 20000 characters.]"
+                return rendered, None, decision
             return task_result.summary, None, decision
 
         ambiguity = getattr(self._router, "ambiguous_routes", None)
@@ -348,7 +383,7 @@ class FridayCore:
         return self._computer
 
     def _computer_tool(self, command: str) -> tuple[str, dict]:
-        plan = self._computer_controller().planner.plan(command)
+        plan = self._deterministic_computer_plan(command)
         if plan is not None and len(plan.actions) == 1:
             action = plan.actions[0]
             if action.capability == Capability.COMPUTER and action.operation.upper() == "OPEN_APP":
@@ -356,6 +391,11 @@ class FridayCore:
             if action.capability == Capability.BROWSER and action.operation.upper() == "NAVIGATE":
                 return "browser.open_url", {"url": action.target}
         return "computer.dispatch_request", {"request": command}
+
+    def _deterministic_computer_plan(self, command: str):
+        planner = getattr(self._computer_controller(), "planner", None)
+        plan = getattr(planner, "plan", None)
+        return plan(command) if callable(plan) else None
 
     def close(self) -> None:
         self.mcp.disconnect_all()

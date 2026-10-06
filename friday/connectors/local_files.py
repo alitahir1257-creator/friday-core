@@ -79,7 +79,7 @@ class LocalFilesConnector:
             return "NO_ROOTS"
         return "READY" if all(Path(r.path).is_dir() for r in self.roots) else "UNAVAILABLE"
 
-    def _safe_path(self, root: ApprovedRoot, relative: str) -> Path:
+    def _safe_path(self, root: ApprovedRoot, relative: str, extensions: frozenset[str] | set[str] = _EXTENSIONS) -> Path:
         win = PureWindowsPath(relative)
         parts = relative.replace("\\", "/").split("/")
         if not relative or win.drive or win.is_absolute() or Path(relative).is_absolute():
@@ -93,9 +93,50 @@ class LocalFilesConnector:
             raise PermissionError("File is outside its approved root.")
         if any(_linked(p) for p in (candidate, *candidate.parents) if p == base or p.is_relative_to(base)):
             raise PermissionError("Linked files and directories are excluded.")
-        if resolved.suffix.casefold() not in _EXTENSIONS or not resolved.is_file():
-            raise PermissionError("Unsupported text file.")
+        if resolved.suffix.casefold() not in extensions or not resolved.is_file():
+            raise PermissionError("Unsupported file type.")
         return resolved
+
+    def read_approved_file(
+        self,
+        source_id: str,
+        *,
+        extensions: frozenset[str],
+        max_bytes: int,
+        privacy_level: str = "public",
+        route_backend: str | None = None,
+    ) -> tuple[Path, bytes, ApprovedRoot]:
+        """Read one bounded file under an approved root, rechecking identity after open."""
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 0 < max_bytes <= self.max_file_bytes:
+            raise ValueError("Read limit must be positive and no larger than the connector limit.")
+        if not extensions or any(not isinstance(ext, str) or not ext.startswith(".") for ext in extensions):
+            raise ValueError("File extensions must be explicit suffixes.")
+        try:
+            prefix, relative = source_id.split(":", 1)
+            index = int(prefix)
+            if not 0 <= index < len(self.roots):
+                raise ValueError
+            root = self.roots[index]
+        except (ValueError, AttributeError, IndexError, TypeError):
+            raise PermissionError("Unknown approved-root file ID.") from None
+        if not self.enabled or not read_allowed(root.privacy, privacy_level, route_backend):
+            raise PermissionError("File is not available on this privacy route.")
+        path = self._safe_path(root, relative, frozenset(ext.casefold() for ext in extensions))
+        before = path.stat()
+        if before.st_size > max_bytes:
+            raise ValueError("FILE_TOO_LARGE")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as file:
+            opened = os.fstat(file.fileno())
+            checked = self._safe_path(root, relative, frozenset(ext.casefold() for ext in extensions)).stat()
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) or (
+                opened.st_dev, opened.st_ino
+            ) != (checked.st_dev, checked.st_ino) or not stat.S_ISREG(opened.st_mode):
+                raise PermissionError("File changed while it was being opened.")
+            data = file.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("FILE_TOO_LARGE")
+        return path, data, root
 
     def _read(self, index: int, relative: str, query: str) -> UnifiedResult | None:
         root = self.roots[index]

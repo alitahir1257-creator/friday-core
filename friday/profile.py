@@ -19,6 +19,8 @@ class AssistantProfile:
     default_response_style: str = "concise"
     cloud_brain_enabled: bool = False
     laya_enabled: bool = False
+    document_roots: tuple[str, ...] = (r"D:\FRIDAY\documents",)
+    public_document_roots: tuple[str, ...] = ()
 
     def system_prompt(self) -> str:
         language_rule = (
@@ -63,4 +65,13 @@ def load_profile(path: Path = PROFILE_PATH) -> AssistantProfile:
     if not isinstance(laya_enabled, bool):
         raise RuntimeError("laya_enabled must be true or false.")
     values["laya_enabled"] = laya_enabled
+    for field, fallback in (("document_roots", list(defaults.document_roots)),
+                            ("public_document_roots", list(defaults.public_document_roots))):
+        roots = supplied.get(field, fallback)
+        if not isinstance(roots, list) or len(roots) > 20 or any(
+            not isinstance(root, str) or not root.strip() or len(root) > 1024 or not Path(root).is_absolute()
+            for root in roots
+        ):
+            raise RuntimeError(f"{field} must be a list of at most 20 absolute directory paths.")
+        values[field] = tuple(root.strip() for root in roots)
     return AssistantProfile(**values)

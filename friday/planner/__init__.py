@@ -14,7 +14,7 @@ from friday.planner.models import (
     TaskStatus,
     WorkerProfile,
 )
-from friday.planner.planner import Planner, is_multi_step_request
+from friday.planner.planner import Planner, is_document_request, is_multi_step_request
 from friday.planner.validator import PlanValidationError, PlanValidator
 
 __all__ = [
@@ -35,5 +35,6 @@ __all__ = [
     "TaskStatus",
     "WorkerExecutor",
     "WorkerProfile",
+    "is_document_request",
     "is_multi_step_request",
 ]

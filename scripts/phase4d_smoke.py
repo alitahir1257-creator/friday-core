@@ -617,7 +617,7 @@ def run_phase4d_2_mocks() -> None:
                 )
                 core = core_for(manager)
                 core.respond(
-                    "Summarize my private financial document.",
+                    "Summarize my private financial information.",
                     request_metadata=BrainRequestMetadata(privacy="private"),
                 )
                 selection = core.last_model_selection
