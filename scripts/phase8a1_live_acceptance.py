@@ -6,17 +6,28 @@ This script performs REAL capture/UIA/OCR on the actual Windows machine.
 It must NOT be claimed as passed from GitHub alone: without a live Windows
 desktop it exits with LOCAL_ACCEPTANCE_REQUIRED.
 
+Two separate observations mirror the production policy (UIA first, OCR
+fallback/on-demand) — the script never fights it:
+
+  OBSERVATION 1 (ocr_mode="auto"):
+    screenshot, active-window observation, UIA evidence, and proof that
+    auto mode skips unnecessary OCR when UIA already covers the text.
+
+  OBSERVATION 2 (ocr_mode="always"):
+    explicit OCR path: availability, visible-text test, OCR blocks,
+    UIA+OCR fusion structure, and OCR latency.
+
 Checks (each prints PASS/FAIL/SKIP):
   1. screenshot capture via python-mss (full primary monitor)
   2. bounded region capture
   3. active window title resolution
-  4. UIA evidence on a known window (Notepad with known text)
-  5. OCR engine probe + OCR on the Notepad screenshot (if RapidOCR installed)
-  6. fused observation structure + provenance
+  4. auto-mode observation: UIA evidence + auto-skips-unneeded-OCR proof
+  5. always-mode observation: OCR blocks, known text, fusion, unavailable-normalized
+  6. dialog summary shape (future 8B foundation)
   7. temp artifact cleanup (no leftover friday-vision-*.png in %TEMP%)
-  8. latency of one observation (reported, not asserted)
+  8. latency of both observations (reported, not asserted)
   9. approximate RAM delta (reported, not asserted)
-  10. no remote calls (observation.remote_calls == 0)
+  10. no remote calls on either observation
 
 Preparation on the laptop before running:
   - Open Notepad, type the line: FRIDAY VISION ACCEPTANCE 8A1
@@ -78,26 +89,46 @@ title = active_window_title()
 check("3.active-window", bool(title))
 print("   active window:", title)
 
-# 4/5/6. observation with UIA + OCR ----------------------------------------------
+# 4. OBSERVATION 1 — auto mode: UIA first, OCR skipped when UIA covers ---------
 ocr_probe = manager._ocr_backend().probe()
 print("   OCR status:", ocr_probe.value)
 t0 = time.perf_counter()
-obs = manager.observe(window_target=None, ocr_mode="auto")
-latency_ms = (time.perf_counter() - t0) * 1000.0
-check("4.uia-evidence", len(obs.uia_elements) > 0)
+obs_auto = manager.observe(window_target=None, ocr_mode="auto")
+auto_latency_ms = (time.perf_counter() - t0) * 1000.0
+check("4.uia-evidence", len(obs_auto.uia_elements) > 0)
+if len(obs_auto.uia_elements) > 0:
+    # Production policy proof: auto mode must NOT spend OCR when UIA covers text.
+    check("4.auto-skips-unneeded-ocr", len(obs_auto.ocr_blocks) == 0)
+else:
+    check("4.auto-skips-unneeded-ocr", None)  # no UIA evidence; policy path not exercised
+check("4.observation-shape",
+      obs_auto.remote_calls == 0 and obs_auto.trust == "untrusted" and bool(obs_auto.timestamp)
+      and len(obs_auto.provenance) > 0)
+
+# 5. OBSERVATION 2 — always mode: explicit OCR path -----------------------------
+t1 = time.perf_counter()
+obs_ocr = manager.observe(window_target=None, ocr_mode="always")
+ocr_latency_ms = (time.perf_counter() - t1) * 1000.0
 if ocr_probe == OcrStatus.AVAILABLE:
-    check("5.ocr-blocks", len(obs.ocr_blocks) > 0)
-    found_known = KNOWN_LINE.casefold() in obs.fused_text.casefold()
+    check("5.ocr-blocks", len(obs_ocr.ocr_blocks) > 0)
+    found_known = KNOWN_LINE.casefold() in obs_ocr.fused_text.casefold()
     check("5.known-notepad-text", found_known)
     if not found_known:
         print("   hint: put Notepad in the foreground with the known line typed.")
+    # Fusion structure: exactly one fused line per provenance item (no dupes).
+    lines = [line for line in obs_ocr.fused_text.splitlines() if line.strip()]
+    check("5.fusion-no-dupes", len(lines) == len(obs_ocr.provenance) and len(lines) > 0)
 else:
     check("5.ocr-blocks", None)
     check("5.known-notepad-text", None)
-check("6.observation-shape",
-      obs.remote_calls == 0 and obs.trust == "untrusted" and bool(obs.timestamp)
-      and len(obs.provenance) > 0)
-dialog = summarize_dialog(obs)
+    check("5.fusion-no-dupes", None)
+    # Normalized result when OCR is unavailable: deterministic status, no crash.
+    check("5.ocr-unavailable-normalized",
+          obs_ocr.ocr_status in (OcrStatus.NOT_INSTALLED, OcrStatus.LOAD_FAILED, OcrStatus.OCR_REQUIRED)
+          and obs_ocr.ocr_blocks == ())
+
+# 6. dialog summary shape (future 8B foundation) ----------------------------------
+dialog = summarize_dialog(obs_ocr)
 check("6.dialog-summary", isinstance(dialog.get("buttons"), list))
 
 # 7. temp cleanup ----------------------------------------------------------------
@@ -107,7 +138,8 @@ if leftovers:
     print("   leftovers:", leftovers[:5])
 
 # 8/9. latency + RAM (reported only) ----------------------------------------------
-print(f"   observation latency: {latency_ms:.1f} ms (reported, not asserted)")
+print(f"   auto observation latency: {auto_latency_ms:.1f} ms (reported, not asserted)")
+print(f"   always-OCR observation latency: {ocr_latency_ms:.1f} ms (reported, not asserted)")
 try:
     import psutil  # optional; absence is fine
 
@@ -118,7 +150,7 @@ except ImportError:
     print("   psutil not installed; RAM not measured (reported, not asserted)")
 
 # 10. no remote calls ---------------------------------------------------------------
-check("10.no-remote-calls", obs.remote_calls == 0)
+check("10.no-remote-calls", obs_auto.remote_calls == 0 and obs_ocr.remote_calls == 0)
 
 manager.close()
 
