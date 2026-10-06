@@ -25,8 +25,10 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -117,6 +119,15 @@ class FakeOcr(OcrEngine):
         return (self._forced, self._blocks)
 
 
+@contextmanager
+def simulate_missing_rapidocr():
+    """Force ImportError for rapidocr_onnxruntime regardless of the real
+    environment, so missing-package tests stay deterministic whether or not
+    RapidOCR is actually installed on the machine running them."""
+    with patch.dict(sys.modules, {"rapidocr_onnxruntime": None}):
+        yield
+
+
 def fake_control(name: str, control_type: str = "Button", automation_id: str = ""):
     return SimpleNamespace(name=name, control_type=control_type, automation_id=automation_id)
 
@@ -162,19 +173,27 @@ except CaptureError:
 check("B.region-bounds", b_ok)
 
 # --- C. malformed image handling -------------------------------------------
-real_ocr = OcrEngine()  # rapidocr not installed here; read() must stay deterministic
+# c1/c2 are decided before any engine touch: environment-independent.
+real_ocr = OcrEngine()
 c1 = real_ocr.read(b"")
 c2 = real_ocr.read(b"definitely not a png")
-c3 = real_ocr.read(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)  # magic ok, undecodable
+# c3 has valid PNG magic: force the missing-package path so the result does
+# not depend on whether RapidOCR happens to be installed on this machine.
+with simulate_missing_rapidocr():
+    c3 = OcrEngine().read(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
 check("C.malformed-image", c1[0] == OcrStatus.OCR_REQUIRED and c2[0] == OcrStatus.OCR_REQUIRED
-      and c3[0] in (OcrStatus.NOT_INSTALLED, OcrStatus.LOAD_FAILED, OcrStatus.OCR_REQUIRED))
+      and c3[0] == OcrStatus.NOT_INSTALLED)
 
-# --- D. OCR unavailable status ---------------------------------------------
-check("D.ocr-not-installed", real_ocr.probe() == OcrStatus.NOT_INSTALLED)
-manager_no_ocr = VisionManager(capture=FakeCapture(), ocr=OcrEngine())
-obs_d = manager_no_ocr.observe(window_target="FakeApp", ocr_mode="always")
-check("D.observation-reports-status",
-      obs_d.ocr_status == OcrStatus.NOT_INSTALLED and obs_d.ocr_blocks == ())
+# --- D. OCR unavailable status (simulated, environment-independent) ---------
+with simulate_missing_rapidocr():
+    missing_engine = OcrEngine()
+    check("D.ocr-not-installed", missing_engine.probe() == OcrStatus.NOT_INSTALLED)
+    manager_no_ocr = VisionManager(capture=FakeCapture(), ocr=OcrEngine())
+    obs_d = manager_no_ocr.observe(window_target="FakeApp", ocr_mode="always")
+    check("D.observation-reports-status",
+          obs_d.ocr_status == OcrStatus.NOT_INSTALLED and obs_d.ocr_blocks == ())
+    st_f, blocks_f = OcrEngine().read(PNG_1X1)
+    check("F.missing-package-isolated", st_f == OcrStatus.NOT_INSTALLED and blocks_f == ())
 
 # --- E. OCR normalization ---------------------------------------------------
 # RapidOCR-style (boxes, texts, scores): boxes as [x1,y1,x2,y2] or polygons.
@@ -195,6 +214,136 @@ try:
 except OcrError:
     e_bad = True
 check("E.ocr-malformed-shape", e_bad)
+
+# --- RapidOCR 1.4.4 shape fixtures ------------------------------------------
+# A. current shape: (rows, timing), rows = [[box, text, score], ...]
+shape_144 = (
+    [
+        [[10, 20, 110, 40], "Hello", 0.92],
+        [[[10, 50], [200, 50], [200, 70], [10, 70]], "World", 0.81],
+    ],
+    {"det": 0.12, "rec": 0.34},
+)
+blocks_144 = normalize_ocr_output(shape_144)
+check("A.shape-1.4.4",
+      len(blocks_144) == 2 and blocks_144[0].text == "Hello"
+      and abs(blocks_144[0].confidence - 0.92) < 1e-9
+      and blocks_144[0].bbox == (10, 20, 100, 20)
+      and blocks_144[0].source == VisionSource.OCR
+      and blocks_144[1].text == "World"
+      and blocks_144[1].bbox == (10, 50, 190, 20))
+
+# B. single row [box, text, score]
+one_row = ([[[5, 5, 55, 25], "Hi", 0.7]], {"elapsed": 0.05})
+blocks_b = normalize_ocr_output(one_row)
+check("B.single-row",
+      len(blocks_b) == 1 and blocks_b[0].text == "Hi"
+      and blocks_b[0].bbox == (5, 5, 50, 20)
+      and abs(blocks_b[0].confidence - 0.7) < 1e-9)
+
+# C. legacy shape still supported: (boxes, texts, scores)
+legacy = ([[10, 20, 110, 40]], ["Legacy"], [0.9])
+blocks_c = normalize_ocr_output(legacy)
+check("C.legacy-shape-preserved",
+      len(blocks_c) == 1 and blocks_c[0].text == "Legacy"
+      and blocks_c[0].bbox == (10, 20, 100, 20))
+
+# D. malformed results -> deterministic OcrError(LOAD_FAILED) with reason
+malformed_shapes = [
+    {"nope": True},
+    ([1, 2, 3],),
+    (None, None),
+    ([[["bad"], "x", 0.5]], {}),
+    ("just a string",),
+    None,
+    ([[10, 20], "text-only-no-score"], {}),
+]
+d_ok = True
+for bad_shape in malformed_shapes:
+    try:
+        normalize_ocr_output(bad_shape)
+        d_ok = False
+    except OcrError as err:
+        if err.status != OcrStatus.LOAD_FAILED or "Unexpected OCR result shape" not in err.detail:
+            d_ok = False
+check("D.malformed-result", d_ok)
+
+# E. empty results -> empty tuple (both shapes)
+check("E.empty-result",
+      normalize_ocr_output(([], {})) == ()
+      and normalize_ocr_output(([], [], [])) == ())
+
+# G. normalization: trim, confidence clamp, NaN, empty-text drop
+shape_g = (
+    [
+        [[0, 0, 10, 10], "  spaced  ", 1.5],
+        [[0, 0, 10, 10], "neg", -0.3],
+        [[0, 0, 10, 10], "nan", float("nan")],
+        [[0, 0, 10, 10], "   ", 0.5],
+    ],
+    {},
+)
+blocks_g = normalize_ocr_output(shape_g)
+check("G.normalization",
+      len(blocks_g) == 3 and blocks_g[0].text == "spaced"
+      and blocks_g[0].confidence == 1.0
+      and blocks_g[1].confidence == 0.0
+      and blocks_g[2].confidence == 0.0)
+
+# H. UIA-first auto-mode behavior unchanged -----------------------------------
+uia_ctrl_h = FakeUiaController((fake_control("Save"),))
+ocr_h = FakeOcr(blocks=(OcrBlock(text="Save", confidence=0.9, bbox=(0, 0, 5, 5)),))
+mgr_h = VisionManager(capture=FakeCapture(), ocr=ocr_h)
+obs_auto_h = mgr_h.observe(window_target="FakeApp", ocr_mode="auto", uia_controller=uia_ctrl_h)
+obs_always_h = mgr_h.observe(window_target="FakeApp", ocr_mode="always", uia_controller=uia_ctrl_h)
+check("H.uia-first-auto-unchanged",
+      len(obs_auto_h.uia_elements) == 1 and obs_auto_h.ocr_blocks == ()
+      and len(obs_always_h.ocr_blocks) == 1
+      and obs_auto_h.ocr_status != OcrStatus.SUCCESS)
+
+# H2. installed-path integration: fake rapidocr_onnxruntime 1.4.4 returning
+# the real (rows, timing) shape through the full OcrEngine.read() path.
+try:
+    from PIL import Image as _PILImage
+    import numpy as _np
+    _HAS_IMG_DEPS = True
+except ImportError:
+    _HAS_IMG_DEPS = False
+
+
+def _make_test_png() -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    _PILImage.new("RGB", (64, 32), "white").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+if _HAS_IMG_DEPS:
+    _fake_rapidocr = ModuleType("rapidocr_onnxruntime")
+
+    class _FakeRapidOCR144:
+        def __call__(self, img):
+            assert img is not None and len(img.shape) == 3
+            return (
+                [
+                    [[10, 20, 110, 40], "InstalledWorks", 0.95],
+                    [[[0, 0], [50, 0], [50, 20], [0, 20]], "Poly", 0.8],
+                ],
+                {"det": 0.1, "rec": 0.2},
+            )
+
+    _fake_rapidocr.RapidOCR = _FakeRapidOCR144
+    with patch.dict(sys.modules, {"rapidocr_onnxruntime": _fake_rapidocr}):
+        _eng144 = OcrEngine()
+        _probe144 = _eng144.probe()
+        _st144, _blocks144 = _eng144.read(_make_test_png())
+    check("H2.installed-1.4.4-path",
+          _probe144 == OcrStatus.AVAILABLE and _st144 == OcrStatus.SUCCESS
+          and len(_blocks144) == 2 and _blocks144[0].text == "InstalledWorks"
+          and _blocks144[1].bbox == (0, 0, 50, 20))
+else:
+    check("H2.installed-1.4.4-path", None)
 
 # --- F/G. UIA + OCR dedupe + provenance -------------------------------------
 uia = (UiElement(name="Retry", kind="Button", identifier="btn1", source=VisionSource.UIA),)

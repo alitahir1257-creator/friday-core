@@ -67,30 +67,113 @@ def _bbox_from_points(box: object) -> tuple[int, int, int, int]:
     return (x, y, max(0, int(x2) - x), max(0, int(y2) - y))
 
 
-def normalize_ocr_output(result: object) -> tuple[OcrBlock, ...]:
-    """Turn a RapidOCR-style (boxes, texts, scores) result into OcrBlocks.
+def _describe_shape(value: object) -> str:
+    """Short safe structural summary for diagnostics (no data dumped)."""
+    if isinstance(value, dict):
+        return "dict"
+    if isinstance(value, (list, tuple)):
+        return f"{type(value).__name__} len {len(value)}"
+    return type(value).__name__
 
-    Pure and deterministic: no model, no I/O. Raises OcrError on unexpected
-    shapes so callers get a stable status instead of a traceback.
-    """
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_box(value: object) -> bool:
+    """A box is [x1,y1,x2,y2] or a 4-point polygon of numbers."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    try:
+        flat: list[float] = []
+        for item in value:
+            if isinstance(item, (list, tuple)):
+                flat.extend(float(v) for v in item)
+            else:
+                flat.append(float(item))
+    except (TypeError, ValueError):
+        return False
+    return len(flat) in (4, 8) and all(_is_number(v) for v in flat)
+
+
+def _is_current_shape(result: object) -> bool:
+    """rapidocr-onnxruntime 1.x: (rows, timing); rows = [[box, text, score], ...]."""
+    if not isinstance(result, (list, tuple)) or len(result) != 2:
+        return False
+    rows = result[0]
+    if not isinstance(rows, (list, tuple)):
+        return False
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            return False
+        box, text, score = row
+        if not _is_box(box) or not isinstance(text, str) or not _is_number(score):
+            return False
+    return True
+
+
+def _is_legacy_shape(result: object) -> bool:
+    """Legacy: (boxes, texts, scores)."""
     if not isinstance(result, (list, tuple)) or len(result) != 3:
-        raise OcrError(OcrStatus.LOAD_FAILED, "Unexpected OCR result shape.")
+        return False
     boxes, texts, scores = result
-    if not isinstance(boxes, (list, tuple)) or not isinstance(texts, (list, tuple)):
-        raise OcrError(OcrStatus.LOAD_FAILED, "Unexpected OCR result shape.")
+    return (
+        isinstance(boxes, (list, tuple))
+        and isinstance(texts, (list, tuple))
+        and isinstance(scores, (list, tuple))
+        and all(_is_box(box) for box in boxes)
+        and all(isinstance(text, str) for text in texts)
+        and all(_is_number(score) for score in scores)
+    )
+
+
+def _normalize_current(rows) -> tuple[OcrBlock, ...]:
+    blocks: list[OcrBlock] = []
+    for box, text, score in rows:
+        cleaned = str(text).strip()
+        if not cleaned:
+            continue
+        blocks.append(OcrBlock(text=cleaned, confidence=_clamp_confidence(score),
+                               bbox=_bbox_from_points(box), source=VisionSource.OCR))
+    return tuple(blocks)
+
+
+def _normalize_legacy(boxes, texts, scores) -> tuple[OcrBlock, ...]:
     blocks: list[OcrBlock] = []
     for index, text in enumerate(texts):
-        text = str(text).strip()
-        if not text:
+        cleaned = str(text).strip()
+        if not cleaned:
             continue
         try:
             bbox = _bbox_from_points(boxes[index])
         except (IndexError, OcrError, ValueError, TypeError) as error:
-            raise OcrError(OcrStatus.LOAD_FAILED, "Unexpected OCR box shape.") from error
-        score = scores[index] if isinstance(scores, (list, tuple)) and index < len(scores) else 0.0
-        blocks.append(OcrBlock(text=text, confidence=_clamp_confidence(score),
+            raise OcrError(OcrStatus.LOAD_FAILED,
+                           f"Unexpected OCR box shape ({_describe_shape(boxes[index]) if index < len(boxes) else 'missing'}).") from error
+        score = scores[index] if index < len(scores) else 0.0
+        blocks.append(OcrBlock(text=cleaned, confidence=_clamp_confidence(score),
                                bbox=bbox, source=VisionSource.OCR))
     return tuple(blocks)
+
+
+def normalize_ocr_output(result: object) -> tuple[OcrBlock, ...]:
+    """Turn a RapidOCR result into OcrBlocks.
+
+    Supported shapes:
+      * current (rapidocr-onnxruntime 1.x): (rows, timing),
+        where rows = [[box, text, score], ...] and timing is ignored;
+      * legacy: (boxes, texts, scores).
+
+    Pure and deterministic: no model, no I/O. Anything else raises OcrError
+    with a short structural reason so callers get a stable status instead
+    of a traceback.
+    """
+    if _is_current_shape(result):
+        return _normalize_current(result[0])  # type: ignore[index]
+    if _is_legacy_shape(result):
+        boxes, texts, scores = result  # type: ignore[misc]
+        return _normalize_legacy(boxes, texts, scores)
+    raise OcrError(OcrStatus.LOAD_FAILED,
+                   f"Unexpected OCR result shape ({_describe_shape(result)}).")
 
 
 class OcrEngine:
