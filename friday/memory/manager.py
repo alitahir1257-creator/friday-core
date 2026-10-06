@@ -52,6 +52,8 @@ class MemoryManager:
         self.store = SQLiteMemoryStore(db_path)
         self.write_policy = write_policy or MemoryWritePolicy()
         self.semantic_index = SemanticMemoryIndex(self.store, semantic_model_path)
+        from friday.memory.experience import ExperienceManager
+        self.experience = ExperienceManager(self)
 
     def _index_semantic(self, item: MemoryItem) -> None:
         if not self.semantic_index.semantic_enabled:

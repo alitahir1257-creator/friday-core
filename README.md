@@ -210,3 +210,39 @@ inspection, `run_now`, approval, history, and cancellation methods for later
 conversation and voice controls. Voice integration is deferred to Phase 9A.
 Automation history is operational SQLite data and is not written to the
 Obsidian-compatible Knowledge Vault or long-term memory.
+
+## Verified experience learning (Phase 7C.2)
+
+`MemoryManager.experience` stores incidents, attempts, resolutions, corrections,
+and playbooks in the existing `D:\FRIDAY\data\memory\friday-memory.sqlite3`.
+Capture is explicit through `start_incident`, `record_attempt`,
+`record_attempt_result`, and `resolve_incident`; chat or model statements are
+never imported automatically. A resolution is **verified** only when a trusted
+caller supplies a test, build, runtime, deterministic tool, or user confirmation
+method with an observed result and a concise evidence reference. Vague claims
+such as “looks fixed” remain `UNVERIFIED` and cannot make playbooks.
+
+Failed attempts stay linked to their incident and appear only as warnings.
+`promote_playbook` requires a verified reusable resolution plus explicit trigger,
+diagnostics, prerequisites, successful steps, and verification steps. Identical
+playbooks share source incidents by content hash; different or contradictory
+evidence remains separate. A single failed attempt does not ban an approach
+for another environment. `supersede_playbook` links the replacement and hides
+the previous recommendation. `correct_incident` records the user's correction,
+invalidates prior verification, and removes affected recommendations.
+`forget_incident` hides the structured incident and removes its semantic memory
+entry; linked playbooks are invalidated. Historical rows remain in SQLite for
+audit until a separate deletion policy is approved.
+
+Verified resolution and playbook text is indexed by the existing local
+Model2Vec/sqlite-vec memory index. FTS5 and structured lexical matching remain
+available when semantic retrieval is unavailable. Retrieval filters by namespace,
+privacy, and project for private records; remote routes see public records only.
+Planner receives a bounded evidence excerpt with failed attempts labelled as
+warnings. Stored logs, webpages, and experience text are untrusted data and
+are never executed. Evidence excerpts are limited to concise text rather than
+whole logs. Run `.venv\Scripts\python.exe -B scripts\phase7c2_smoke.py` for
+offline fixtures and nested Phase 7C.1 through Phase 5C regressions. The single
+Roman Urdu probe measures only that phrase, not general multilingual quality.
+
+Phase 7C.2 does NOT autonomously install software or modify FRIDAY itself.

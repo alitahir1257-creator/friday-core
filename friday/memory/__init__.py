@@ -1,6 +1,7 @@
 """Local persistent memory for FRIDAY Core."""
 
 from friday.memory.manager import MemoryManager
+from friday.memory.experience import ExperienceManager
 from friday.memory.models import (
     MemoryContext,
     MemoryItem,
@@ -21,6 +22,7 @@ __all__ = [
     "MemoryKind",
     "MemoryLink",
     "MemoryManager",
+    "ExperienceManager",
     "MemoryNotFoundError",
     "MemoryPrivacy",
     "MemorySearchResult",

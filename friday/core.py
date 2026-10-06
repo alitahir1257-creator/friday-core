@@ -81,7 +81,9 @@ class FridayCore:
         self.documents = DocumentManager(self.document_files, self._brain_manager, self.research_engine)
         register_document_tools(self.tool_registry, self.documents)
         self.mcp = MCPClientManager(self.tool_registry)
-        self.planner = planner or Planner(self._brain_manager, self.tool_registry, self._model_policy_engine)
+        memory = getattr(self._brain_manager, "memory", None)
+        self.planner = planner or Planner(self._brain_manager, self.tool_registry, self._model_policy_engine,
+                                          experience=getattr(memory, "experience", None))
         self.worker_executor = worker_executor or WorkerExecutor(
             self.tool_registry, planner=self.planner,
         )
