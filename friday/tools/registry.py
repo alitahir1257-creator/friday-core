@@ -222,10 +222,15 @@ class ToolRegistry:
             )
         except Exception as error:
             safe_error = _redact_text(str(error), secret_values)[:500]
+            requested_code = getattr(error, "code", None)
+            error_code = requested_code if isinstance(requested_code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,59}", requested_code) else type(error).__name__.upper()
+            error_data = getattr(error, "structured_data", None)
+            if error_data is None:
+                error_data = {"message": safe_error}
             return self._finish(
                 canonical_name, risk, decision, False, "error",
-                f"Tool failed ({type(error).__name__}).", type(error).__name__.upper(), started,
-                tool.side_effects, structured_data={"message": safe_error},
+                f"Tool failed ({type(error).__name__}).", error_code, started,
+                tool.side_effects, structured_data=error_data,
                 approval_result=approval_result, secret_values=secret_values,
             )
 

@@ -18,9 +18,10 @@ _REDIRECTS = {301, 302, 303, 307, 308}
 _ALLOWED_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 _USER_AGENT = "FRIDAY-Research/1.0 (+read-only public research; contact: local user agent)"
 class ResearchFetchError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.status_code = status_code
 
 
 class _PinnedHTTPSConnection(HTTPSConnection):
@@ -41,6 +42,8 @@ class ResearchFetcher:
         max_bytes: int = 2_000_000,
         max_redirects: int = 4,
         fixture_hosts: tuple[str, ...] = (),
+        accepted_types: tuple[str, ...] = _ALLOWED_TYPES,
+        user_agent: str = _USER_AGENT,
         resolver=getaddrinfo,
         connection_factory=None,
     ) -> None:
@@ -50,10 +53,16 @@ class ResearchFetcher:
             raise ValueError("max_bytes must be from 1024 to 10000000.")
         if not 0 <= max_redirects <= 5:
             raise ValueError("max_redirects must be from 0 to 5.")
+        if not accepted_types or any(not isinstance(value, str) or "/" not in value for value in accepted_types):
+            raise ValueError("accepted_types must contain media types.")
+        if not isinstance(user_agent, str) or not user_agent.strip() or len(user_agent) > 200:
+            raise ValueError("user_agent must contain 1 to 200 characters.")
         self.timeout_seconds = float(timeout_seconds)
         self.max_bytes = max_bytes
         self.max_redirects = max_redirects
         self.fixture_hosts = frozenset(host.casefold() for host in fixture_hosts)
+        self.accepted_types = tuple(value.casefold() for value in accepted_types)
+        self.user_agent = user_agent.strip()
         self._resolver = resolver
         self._connection_factory = connection_factory
 
@@ -92,8 +101,8 @@ class ResearchFetcher:
                     "GET", target,
                     headers={
                         "Host": host_header,
-                        "User-Agent": _USER_AGENT,
-                        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
+                        "User-Agent": self.user_agent,
+                        "Accept": ",".join(self.accepted_types),
                         "Accept-Encoding": "identity",
                         "Connection": "close",
                     },
@@ -107,12 +116,12 @@ class ResearchFetcher:
                     current = normalize_url(urljoin(current, location), fixture_hosts=self.fixture_hosts)
                     continue
                 if not 200 <= status < 300:
-                    raise ResearchFetchError("HTTP_ERROR", f"The page returned HTTP {status}.")
+                    raise ResearchFetchError("HTTP_ERROR", f"The page returned HTTP {status}.", status_code=status)
                 content_type = response.getheader("Content-Type", "").strip()
                 media_type = content_type.split(";", 1)[0].casefold()
                 if media_type == "application/pdf" or parsed.path.casefold().endswith(".pdf"):
                     return FetchResult(requested, current, status, content_type or "application/pdf", b"", {}, "DOCUMENT_PARSING_DEFERRED")
-                if media_type not in _ALLOWED_TYPES:
+                if media_type not in self.accepted_types:
                     raise ResearchFetchError("UNSUPPORTED_CONTENT_TYPE", "The source is not an HTML, XHTML, or text page.")
                 content_encoding = response.getheader("Content-Encoding", "identity").strip().casefold()
                 if content_encoding not in {"", "identity"}:

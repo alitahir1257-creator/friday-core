@@ -34,6 +34,8 @@ from friday.documents import DocumentManager
 from friday.tools.adapters import register_computer_tools, register_knowledge_tools
 from friday.tools.documents import register_document_tools
 from friday.tools.research import register_research_tools
+from friday.apis.registry import build_default_api_registry
+from friday.tools.public_apis import register_public_api_tools
 from friday.research.engine import ResearchEngine
 from friday.tools.models import ToolResult
 from friday.tools.registry import ToolRegistry
@@ -78,6 +80,8 @@ class FridayCore:
         )
         self.research_engine = research_engine or ResearchEngine(self._brain_manager)
         register_research_tools(self.tool_registry, self.research_engine)
+        self.api_registry = build_default_api_registry()
+        register_public_api_tools(self.tool_registry, self.api_registry, self.research_engine)
         self.documents = DocumentManager(self.document_files, self._brain_manager, self.research_engine)
         register_document_tools(self.tool_registry, self.documents)
         self.mcp = MCPClientManager(self.tool_registry)
@@ -165,6 +169,7 @@ class FridayCore:
             selection.policy == ModelPolicy.RESEARCH
             or self._model_policy_engine.requires_research(command)
         )
+        structured_api_requested = self.planner.has_public_api_intent(command, privacy=privacy.value)
         if (
             research_requested
             and not self.tool_registry.find_by_capability("research")
@@ -200,7 +205,7 @@ class FridayCore:
             )
             return result.summary, None, decision
 
-        if multi_step or research_requested:
+        if multi_step or research_requested or structured_api_requested:
             planning_policy = ModelPolicy.PRIVATE if privacy != PrivacyLevel.PUBLIC else ModelPolicy.SMART
             planning_selection = self._model_policy_engine.select(
                 command,
@@ -223,7 +228,7 @@ class FridayCore:
             if last_result is not None:
                 self.last_tool_result = last_result
             self._last_model_selection = self.planner.last_selection or planning_selection
-            if research_requested and not multi_step and last_result is not None:
+            if (research_requested or structured_api_requested) and not multi_step and last_result is not None:
                 return last_result.summary, None, decision
             if document_request and last_result is not None and last_result.success and last_result.tool_name.startswith("documents."):
                 rendered = json.dumps(last_result.structured_data, ensure_ascii=False, default=str)

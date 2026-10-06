@@ -38,6 +38,7 @@ from friday.planner import (
     WorkerProfile,
 )
 from friday.profile import AssistantProfile
+from friday.research.search import BrowserSearchProvider
 from friday.router import Route, create_router
 from friday.tools.adapters import register_knowledge_tools
 from friday.tools.models import RiskLevel, ToolDefinition, ToolResult
@@ -627,9 +628,12 @@ def run() -> None:
                 "FRIDAY_RESEARCH_SEARXNG_URL": "",
                 "FRIDAY_RESEARCH_BROWSER_SEARCH_ENGINE": "unsupported",
             }):
-                research_core = FridayCore(AssistantProfile(), router=create_router(), brain_manager=research_brain)
-                research_response, _, _ = research_core.respond("Research the latest browser testing tools and cite sources.")
-                research_core.close()
+                # Keep this failure-path assertion offline even when DuckDuckGo is reachable.
+                with patch("friday.research.engine.configured_search_providers",
+                           return_value=(BrowserSearchProvider("unsupported"),)):
+                    research_core = FridayCore(AssistantProfile(), router=create_router(), brain_manager=research_brain)
+                    research_response, _, _ = research_core.respond("Research the latest browser testing tools and cite sources.")
+                    research_core.close()
             assert "SEARCH_UNAVAILABLE" in research_response
             assert research_brain.calls == 0 and research_core.planner.model_calls == 0
             assert research_core.current_task_run.status == TaskStatus.SUCCEEDED

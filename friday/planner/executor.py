@@ -39,7 +39,7 @@ from friday.tools.registry import ToolRegistry
 
 ApprovalCallback = Callable[[TaskApprovalRequest], str]
 _TRANSIENT_ERRORS = {"TIMEOUTERROR", "CONNECTIONERROR", "OSERROR", "URLERROR", "MCPCLIENTERROR"}
-_UNAVAILABLE_ERRORS = {"TOOL_NOT_FOUND", "TOOL_DISABLED", "MCPCLIENTERROR"}
+_UNAVAILABLE_ERRORS = {"TOOL_NOT_FOUND", "TOOL_DISABLED", "MCPCLIENTERROR", "PUBLIC_API_UNAVAILABLE"}
 _TERMINAL = {
     TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.BLOCKED,
     TaskStatus.PARTIAL, TaskStatus.CANCELLED, TaskStatus.DRY_RUN, TaskStatus.HANDOFF_READY,
@@ -394,7 +394,7 @@ class WorkerExecutor:
         validated = self._validated[run.id]
         failed_risk = risk or validated.risks.get(step.id)
         failed_tool = validated.tools.get(step.id)
-        if failed_risk != RiskLevel.READ_ONLY or (side_effects or getattr(failed_tool, "side_effects", "unknown")) != "none":
+        if failed_risk != RiskLevel.READ_ONLY or (side_effects or getattr(failed_tool, "side_effects", "unknown")) not in {"none", "external_read"}:
             return False
         if any(
             item.status == StepStatus.SUCCEEDED and item.risk in {RiskLevel.CONSEQUENTIAL.value, RiskLevel.DESTRUCTIVE.value}
@@ -409,7 +409,7 @@ class WorkerExecutor:
                 return False
             replacement = repaired.tools.get(step.id)
             replacement_risk = repaired.risks.get(step.id)
-            if replacement is None or not replacement.enabled or replacement_risk != RiskLevel.READ_ONLY or replacement.side_effects != "none":
+            if replacement is None or not replacement.enabled or replacement_risk != RiskLevel.READ_ONLY or replacement.side_effects not in {"none", "external_read"}:
                 return False
         except (PlanValidationError, ValueError, RuntimeError):
             return False

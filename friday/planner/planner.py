@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
+from datetime import date
 from typing import Callable
 
 from friday.brain_manager import BrainRequestMetadata
@@ -35,6 +37,33 @@ _STEP_FIELDS = {
     "id", "description", "profile", "capability", "preferred_tool", "arguments",
     "dependencies", "risk_hint", "verification",
 }
+_WEATHER_INTENT = re.compile(
+    r"^(?P<mode>current weather|weather|forecast)\s+(?:in|for|at)\s+"
+    r"(?P<place>[\w\s.,'()\-]{2,120}?)(?:\s+for the next (?P<days>[1-7]) days?)?[?.!]*$",
+    re.IGNORECASE,
+)
+_CONVERT_INTENT = re.compile(
+    r"^(?:convert\s+)?(?P<amount>[0-9]+(?:\.[0-9]+)?)\s+(?P<base>[A-Za-z]{3})\s+(?:to|into)\s+"
+    r"(?P<quote>[A-Za-z]{3})[?.!]*$",
+    re.IGNORECASE,
+)
+_HOLIDAY_INTENT = re.compile(
+    r"^(?:(?P<before>[A-Za-z][\w\s&'().-]{1,78}?)\s+(?:public\s+)?holidays|"
+    r"(?:public\s+)?holidays\s+(?:in|for)\s+(?P<after>[A-Za-z][\w\s&'().-]{1,78}?))"
+    r"(?:\s+(?P<year>20\d{2}))?[?.!]*$",
+    re.IGNORECASE,
+)
+_COUNTRY_CODES = {
+    "pakistan": "PK", "saudi arabia": "SA", "saudi": "SA",
+    "germany": "DE", "united states": "US", "usa": "US", "us": "US",
+    "united kingdom": "GB", "uk": "GB", "great britain": "GB",
+    "united arab emirates": "AE", "uae": "AE", "canada": "CA", "australia": "AU",
+    "india": "IN", "france": "FR", "japan": "JP", "netherlands": "NL",
+    "new zealand": "NZ", "italy": "IT", "spain": "ES", "china": "CN",
+    "egypt": "EG", "turkey": "TR", "turkiye": "TR", "south africa": "ZA",
+    "bangladesh": "BD", "sri lanka": "LK", "singapore": "SG", "malaysia": "MY",
+    "indonesia": "ID", "kenya": "KE", "brazil": "BR", "mexico": "MX",
+}
 
 
 def is_multi_step_request(goal: str) -> bool:
@@ -46,6 +75,54 @@ def is_document_request(goal: str) -> bool:
     return isinstance(goal, str) and bool(
         _DOCUMENT_EXTENSION.search(goal) or (_DOCUMENT_ACTION.search(goal) and _DOCUMENT_NOUN.search(goal))
     )
+
+
+def _structured_api_step(goal: str) -> PlanStep | None:
+    text = goal.strip()
+    match = _WEATHER_INTENT.fullmatch(text)
+    if match:
+        place = match.group("place").strip(" ?.!")
+        forecast = match.group("mode").casefold() == "forecast" or match.group("days") is not None
+        arguments = {"operation": "forecast" if forecast else "current", "city": place}
+        if forecast:
+            arguments["days"] = int(match.group("days") or 3)
+        return PlanStep(
+            id="structured_api", description="Retrieve structured weather data for the named public place.",
+            profile=WorkerProfile.RESEARCH, capability="weather", preferred_tool="public_api.weather",
+            arguments=arguments, verification="tool_success",
+        )
+
+    match = _CONVERT_INTENT.fullmatch(text)
+    if match:
+        amount = float(match.group("amount"))
+        if amount <= 1_000_000_000_000:
+            return PlanStep(
+                id="structured_api", description="Retrieve a daily reference exchange rate and calculate the requested conversion.",
+                profile=WorkerProfile.RESEARCH, capability="currency", preferred_tool="public_api.currency",
+                arguments={"operation": "convert", "base": match.group("base").upper(),
+                           "quote": match.group("quote").upper(), "amount": amount},
+                verification="tool_success",
+            )
+
+    match = _HOLIDAY_INTENT.fullmatch(text)
+    if match:
+        country = (match.group("before") or match.group("after") or "").strip()
+        country = re.sub(r"\s+", " ", country)
+        country_code = _COUNTRY_CODES.get(country.casefold())
+        if country_code is None and re.fullmatch(r"[A-Za-z]{2}", country):
+            country_code = country.upper()
+        if country_code:
+            return PlanStep(
+                id="structured_api", description="Retrieve structured public holiday data for the named country.",
+                profile=WorkerProfile.RESEARCH, capability="holidays", preferred_tool="public_api.holidays",
+                arguments={
+                    "country_code": country_code,
+                    "country_name": country,
+                    "year": int(match.group("year") or date.today().year),
+                },
+                verification="tool_success",
+            )
+    return None
 
 
 def _schema_contract(schema: dict) -> dict:
@@ -85,6 +162,16 @@ class Planner:
         self.model_calls = 0
         self.last_selection: ModelSelection | None = None
 
+    @staticmethod
+    def has_public_api_intent(goal: str, *, privacy: str = "public") -> bool:
+        return (
+            privacy == "public"
+            and isinstance(goal, str)
+            and not is_multi_step_request(goal)
+            and not is_document_request(goal)
+            and _structured_api_step(goal) is not None
+        )
+
     def plan(self, goal: str, *, privacy: str = "public", namespace: str = "global") -> TaskPlan:
         return self._generate(goal, privacy, namespace)
 
@@ -97,6 +184,17 @@ class Planner:
     ) -> TaskPlan:
         namespace = normalize_namespace(plan.namespace)
         failed_step = next(step for step in plan.steps if step.id == step_id)
+        if plan.privacy == "public" and failure_code == "PUBLIC_API_UNAVAILABLE":
+            failed_tool = self.tool_registry.get(failed_step.preferred_tool or "")
+            if failed_tool is not None and not failed_tool.metadata.get("fallback_only"):
+                fallback_name = f"public_api.{failed_step.capability}_research_fallback"
+                fallback = self.tool_registry.get(fallback_name)
+                if fallback is not None and fallback.enabled:
+                    steps = tuple(
+                        replace(step, preferred_tool=fallback_name) if step.id == step_id else step
+                        for step in plan.steps
+                    )
+                    return replace(plan, steps=steps)
         context = {
             "step_id": step_id,
             "capability": failed_step.capability,
@@ -169,6 +267,16 @@ class Planner:
         if privacy not in {"public", "private", "local_only"}:
             raise ValueError("privacy must be public, private, or local_only.")
         namespace = normalize_namespace(namespace)
+        api_step = (
+            _structured_api_step(goal)
+            if repair_context is None and privacy == "public"
+            and not is_multi_step_request(goal) and not is_document_request(goal)
+            else None
+        )
+        if api_step is not None:
+            tool = self.tool_registry.get(api_step.preferred_tool or "")
+            if tool is not None and tool.enabled:
+                return TaskPlan(goal, (api_step,), privacy=privacy, namespace=namespace)
         research_tool = self.tool_registry.get("research.run")
         if (
             research_tool is not None
@@ -201,6 +309,7 @@ class Planner:
                 "input_schema": _schema_contract(tool.input_schema),
             }
             for tool in self.tool_registry.list(enabled_only=True)
+            if repair_context is not None or not tool.metadata.get("fallback_only")
             if privacy in tool.privacy_support and (
                 privacy == "public" or not tool.transmits_data or tool.privacy_resolver is not None
             )

@@ -183,6 +183,26 @@ The English model is not a multilingual-quality guarantee. The single Phase 7C.1
 
 For an individually reviewed candidate, record its name, category, description, authentication requirement, HTTPS and CORS metadata where listed, and MCP transport/install metadata where applicable; preserve unknown values as unknown. Verify current provider documentation, availability, cost and limits, terms, security, and data handling before implementation. Phase 7D owns selected API/MCP integrations, each with its own explicit configuration and security review.
 
+### Vetted public API connectors (Phase 7D)
+
+The catalog remains discovery/reference only. FRIDAY currently registers three fixed, read-only capabilities; it does not import catalog entries, install SDKs, or discover arbitrary API hosts at runtime. Each provider call sends only the parameters listed below. All require HTTPS and no API key or account.
+
+| Provider | Capability | Free-use status and limits | Data sent |
+| --- | --- | --- | --- |
+| [Open-Meteo](https://open-meteo.com/en/docs) | Current weather and up to 7 forecast days | No key. Free for non-commercial use; published free limits are 600/minute, 5,000/hour, 10,000/day, and 300,000/month. Commercial use requires a paid plan. No uptime SLA; attribution is required under CC BY 4.0. See [pricing and terms](https://open-meteo.com/en/pricing). | Place name for geocoding, then coordinates and fixed weather fields. |
+| [Frankfurter](https://frankfurter.dev/) | Daily reference FX rates and conversions | No key, published daily/monthly quota, or payment requirement; abusive traffic may be throttled. Rates update daily and are not for live trading. Upstream rate-source terms still apply. | Three-letter currency codes only. |
+| [Nager.Date Community API](https://nagerholidays.com/api) | Public holidays by ISO country code and year | No key. Terms allow private/non-profit use; commercial API use requires sponsorship. Docs publish no request limit and disclaim availability/accuracy. Coverage varies; Pakistan and Saudi Arabia are not listed as supported in the current [coverage list](https://nagerholidays.com/country/coverage). | ISO country code and year only. |
+
+Open-Meteo and Nager.Date are enabled only for use allowed by their current free-use terms. In particular, do not use either for commercial workloads without the provider's required paid plan or sponsorship. Frankfurter provides daily reference rates, not trading quotes. These services can change; re-check the linked official documentation before changing this set.
+
+REST Countries was evaluated and left out: its current API requires an API key and its free plan is limited to prototyping/evaluation and non-commercial use. No country-metadata connector is enabled in this batch. `public-apis/public-apis` was used as a catalog lead only; provider documentation and terms were checked independently.
+
+`public_api.weather`, `public_api.currency`, and `public_api.holidays` are exposed through ToolRegistry and selected by the Planner for matching structured requests. A provider failure produces a normalized error and permits at most one explicit, bounded, public `ResearchEngine` fallback. The fallback never runs in PRIVATE or local-only mode. Public API tools are excluded from private plans; private memory, vault, documents, credentials, and unrelated conversation context are not sent. API responses carry provider, capability, request time, source endpoint, provider update time where available, and a network/cache indicator. Raw provider payloads are reduced to bounded fields.
+
+The HTTP client uses FRIDAY's existing DNS-pinned fetcher, fixed HTTPS host/path contracts, a 6-second timeout, a 256 KiB body limit, JSON-only parsing, and no redirects, cookies, compressed responses, or retries. It normalizes transport, provider, rate-limit, malformed JSON, and policy failures. Public responses may use a bounded 64-entry in-memory cache with short capability-specific TTLs; there is no persistent cache, polling, or background service. Diagnostics are on demand and record registration plus last success/failure.
+
+Run `.venv\Scripts\python.exe -B scripts\phase7d_smoke.py` for deterministic safety/ToolRegistry/Planner checks, separate live provider probes, and Phase 7C.2 plus its nested regressions. A live network failure is reported as BLOCKED, separately from deterministic code checks.
+
 ## Local automations (Phase 6C)
 
 `AutomationManager` stores automation definitions and compact run receipts in SQLite at
