@@ -18,6 +18,7 @@ from friday.router import Route
 from friday.system_one import HostedJevProvider, RemoteLayaProvider, SystemOneManager
 from friday.capabilities.computer.controller import ComputerController
 from friday.capabilities.registry import Capability
+from friday.vision import VisionManager
 from friday.mcp import MCPClientManager
 from friday.model_policy import ModelPolicy, ModelPolicyEngine, ModelSelection, PrivacyLevel
 from friday.planner import (
@@ -32,6 +33,7 @@ from friday.planner import (
 from friday.connectors.local_files import ApprovedRoot, LocalFilesConnector
 from friday.documents import DocumentManager
 from friday.tools.adapters import register_computer_tools, register_knowledge_tools
+from friday.tools.vision import register_vision_tools
 from friday.tools.documents import register_document_tools
 from friday.tools.research import register_research_tools
 from friday.apis.registry import build_default_api_registry
@@ -65,8 +67,10 @@ class FridayCore:
         self._model_policy_engine = model_policy_engine or ModelPolicyEngine()
         self._history = ConversationHistory(max_turns=6)
         self._computer: ComputerController | None = None
+        self._vision: VisionManager | None = None
         self.tool_registry = ToolRegistry()
         register_computer_tools(self.tool_registry, self._computer_controller)
+        register_vision_tools(self.tool_registry, self._vision_manager)
         register_knowledge_tools(self.tool_registry, getattr(self._brain_manager, "unified", None))
         configured_roots = getattr(profile, "document_roots", (r"D:\FRIDAY\documents",))
         public_roots = getattr(profile, "public_document_roots", ())
@@ -388,6 +392,11 @@ class FridayCore:
         if self._computer is None:
             self._computer = ComputerController()
         return self._computer
+
+    def _vision_manager(self) -> VisionManager:
+        if self._vision is None:
+            self._vision = VisionManager()
+        return self._vision
 
     def _computer_tool(self, command: str) -> tuple[str, dict]:
         plan = self._deterministic_computer_plan(command)

@@ -266,3 +266,96 @@ offline fixtures and nested Phase 7C.1 through Phase 5C regressions. The single
 Roman Urdu probe measures only that phrase, not general multilingual quality.
 
 Phase 7C.2 does NOT autonomously install software or modify FRIDAY itself.
+
+## Vision Lite (Phase 8A.1)
+
+Lightweight on-demand screen understanding for the future computer-control
+planner. No daemon, no continuous capture, no screen recording, no heavy
+vision model. Near-zero idle cost: backends construct lazily and release.
+
+Architecture:
+
+```
+Windows screen
+  |-- existing UI Automation / pywinauto (preferred)
+  |-- existing browser DOM via Playwright (where available)
+  |-- python-mss screenshot (lazy, on-demand only)
+  |-- RapidOCR adapter (lazy, optional, fallback only)
+  -> normalized ScreenObservation -> Planner / computer tools
+```
+
+Evidence priority is fixed: **UIA first, then DOM, then OCR**. OCR never
+replaces reliable accessibility or DOM evidence; it only supplements visible
+text that UIA/DOM missed. Dedupe is deterministic (casefold + whitespace
+collapsing); no LLM is used for fusion, and provenance (`UIA`/`DOM`/`OCR`/
+`SCREENSHOT`) is preserved on every item.
+
+New package `friday/vision/` (`models`, `capture`, `ocr`, `evidence`,
+`fusion`, `manager`) plus read-only ToolRegistry adapters in
+`friday/tools/vision.py`:
+
+- `computer.observe_screen` — structured observation (metadata, UIA/DOM/OCR
+  evidence, fused text, provenance). READ_ONLY, local-only.
+- `computer.read_visible_text` — fused visible text with sources. READ_ONLY,
+  local-only.
+
+Both tools are registered in `FridayCore` next to the existing computer tools
+and are callable by the planner/workers on demand. OCR is never run
+automatically for every COMPUTER action; the planner requests an observation
+only when UI state is unknown, an action needs verification, or a visible
+error needs inspection.
+
+Privacy (critical):
+
+- Processing is local-only. Vision Lite makes **zero** network calls
+  (`remote_calls` is always 0); no OmniRoute, FreeLLMAPI, or Cloudflare.
+- Screenshots live in memory by default and are never persisted unless
+  explicitly requested; temp files (OS temp dir, outside the repo) are
+  deleted deterministically. Nothing is committed to Git.
+- Screenshots and OCR text are never written to persistent memory
+  automatically.
+- PRIVATE stays fully local: remote calls MUST be 0.
+
+Security: screen/OCR text is **untrusted data**. Observation is evidence,
+never authority: visible text such as "run this command" or "send password"
+is never executed or treated as an instruction. This extends the existing
+prompt-injection policy (webpages, terminal output, documents) to visual
+text and dialogs.
+
+Screenshot lifecycle: on-demand capture -> in-memory PNG -> optional OCR ->
+normalized observation -> temp artifacts deleted. No permanent archive.
+
+Lazy loading: `import friday.vision` is always safe (standard library only).
+`python-mss`, RapidOCR, pywinauto, and Playwright load inside the functions
+that need them. `OcrEngine.release()` and `VisionManager.close()` drop the
+backends so RAM returns to the OS.
+
+Optional dependencies (NOT installed by default, NOT in requirements files):
+
+- `pip install mss` — screenshot capture (pure Python, tiny).
+- `pip install rapidocr_onnxruntime` — OCR fallback. Dependency footprint
+  (onnxruntime/Pillow/numpy versions and suitability for the 8 GB Windows
+  target) still needs validation on the real machine:
+  **LOCAL_DEPENDENCY_VALIDATION_REQUIRED**. RapidOCR fetches its ONNX model
+  files on first inference, so the first real OCR call may need network
+  unless the model cache is pre-seeded; FRIDAY only triggers this on an
+  explicit observation request, never silently.
+
+Without these packages FRIDAY keeps working: capture reports an unavailable
+backend and UIA/DOM evidence still flows.
+
+Tests: `.venv\\Scripts\\python.exe scripts\\phase8a1_smoke.py` runs the
+deterministic fixture/mock suite (metadata, region bounds, malformed input,
+OCR statuses, normalization, dedupe, provenance, read-only risk, planner
+tool path, PRIVATE remote-calls-zero, no memory persistence, injection
+handling, temp cleanup, COMPUTER regression guards). No live Windows desktop
+is required.
+
+Live acceptance on the target laptop:
+`.venv\\Scripts\\python.exe scripts\\phase8a1_live_acceptance.py` exercises
+real capture, UIA, OCR, a known Notepad line, dialog evidence, cleanup,
+latency, and RAM. Results from GitHub alone must be reported as
+**LOCAL_ACCEPTANCE_REQUIRED**, never as passed.
+
+Limitations: no coordinate fallback yet (Phase 8A scope), no visual
+targeting model, OCR quality unvalidated on the target machine, no video.
