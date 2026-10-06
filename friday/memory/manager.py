@@ -29,6 +29,7 @@ from friday.memory.policy import (
     normalize_text,
     validate_metadata,
 )
+from friday.memory.semantic import SemanticMemoryIndex
 from friday.memory.store import SQLiteMemoryStore, normalize_timestamp, utc_now
 
 
@@ -41,9 +42,32 @@ _PRIVACY_ORDER = {MemoryPrivacy.PUBLIC: 0, MemoryPrivacy.PRIVATE: 1, MemoryPriva
 class MemoryManager:
     """Authoritative local SQLite memory with content-free operational logging."""
 
-    def __init__(self, db_path: str | PathLike[str] | None = None, *, write_policy: MemoryWritePolicy | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | PathLike[str] | None = None,
+        *,
+        write_policy: MemoryWritePolicy | None = None,
+        semantic_model_path: str | PathLike[str] | None = None,
+    ) -> None:
         self.store = SQLiteMemoryStore(db_path)
         self.write_policy = write_policy or MemoryWritePolicy()
+        self.semantic_index = SemanticMemoryIndex(self.store, semantic_model_path)
+
+    def _index_semantic(self, item: MemoryItem) -> None:
+        if not self.semantic_index.semantic_enabled:
+            return
+        try:
+            self.semantic_index.index(item)
+        except Exception as error:
+            self.semantic_index.mark_failure(error)
+            _LOG.warning("memory_semantic_index_failed error=%s", type(error).__name__)
+
+    def _remove_semantic(self, memory_id: str) -> None:
+        try:
+            self.semantic_index.remove(memory_id)
+        except Exception as error:
+            self.semantic_index.mark_failure(error)
+            _LOG.warning("memory_semantic_remove_failed error=%s", type(error).__name__)
 
     @staticmethod
     def _enum(value: Any, enum_type: type, name: str):
@@ -92,6 +116,7 @@ class MemoryManager:
         duplicate = self.store.find_active_duplicate(scope, memory_kind, memory_privacy, normalized)
         if duplicate is not None and duplicate.expires_at is not None and duplicate.expires_at <= utc_now():
             self.store.set_status(duplicate.id, MemoryStatus.SUPERSEDED)
+            self._remove_semantic(duplicate.id)
             duplicate = None
         if duplicate is not None:
             item = self.store.merge_duplicate(
@@ -106,6 +131,7 @@ class MemoryManager:
                 expires_at=expiry, metadata=attributes,
             )
             result = "inserted"
+        self._index_semantic(item)
         _LOG.info(
             "memory_write id=%s kind=%s namespace=%s privacy=%s result=%s duration_ms=%.1f",
             item.id, item.kind.value, item.namespace, item.privacy.value, result,
@@ -167,6 +193,7 @@ class MemoryManager:
         duplicate = self.store.find_active_duplicate(new_namespace, new_kind, new_privacy, normalize_text(content))
         if duplicate is not None and duplicate.id != old.id:
             self.store.set_status(old.id, MemoryStatus.SUPERSEDED)
+            self._remove_semantic(old.id)
             item = self.store.merge_duplicate(
                 duplicate.id, content=content.strip(), source=new_source.strip(), importance=new_importance,
                 confidence=new_confidence, expires_at=expiry, metadata=attributes,
@@ -181,6 +208,9 @@ class MemoryManager:
                 )
             except KeyError as error:
                 raise MemoryNotFoundError() from error
+            if item.id != old.id:
+                self._remove_semantic(old.id)
+        self._index_semantic(item)
         _LOG.info(
             "memory_update id=%s old_id=%s kind=%s namespace=%s privacy=%s duration_ms=%.1f",
             item.id, old.id, item.kind.value, item.namespace, item.privacy.value,
@@ -192,6 +222,7 @@ class MemoryManager:
         item = self.store.set_status(memory_id, MemoryStatus.FORGOTTEN)
         if item is None:
             raise MemoryNotFoundError()
+        self._remove_semantic(memory_id)
         _LOG.info("memory_forget id=%s kind=%s namespace=%s privacy=%s", item.id, item.kind.value, item.namespace, item.privacy.value)
         return item
 
@@ -230,8 +261,6 @@ class MemoryManager:
         if not normalized_query or limit == 0:
             return []
         terms = list(dict.fromkeys(_QUERY_TOKEN.findall(normalized_query)))[:24]
-        if not terms:
-            return []
         fts_query = " OR ".join('"' + token.replace('"', '""') + '"' for token in terms)
         namespaces = (scope, "global") if include_global and scope != "global" else (scope,)
         allowed = (MemoryPrivacy.PUBLIC,)
@@ -245,22 +274,56 @@ class MemoryManager:
             query=normalized_query, namespaces=namespaces, privacy=allowed,
             limit=max(100, limit * 20), include_inactive=include_inactive,
             include_expired=include_expired, fts_query=fts_query,
-        )
+        ) if terms else []
+        candidates_by_id = {item.id: item for item in candidates}
+        semantic_scores: dict[str, float] = {}
         term_set = set(terms)
+        lexical_match_is_strong = any(
+            normalized_query in normalize_text(item.content)
+            or len(term_set & set(_QUERY_TOKEN.findall(normalize_text(item.content)))) / max(1, len(term_set)) >= 0.8
+            for item in candidates
+        )
+        # Exact/near-exact FTS hits already answer the query; reserve vector work for paraphrases and weak matches.
+        if not lexical_match_is_strong:
+            try:
+                semantic_hits = self.semantic_index.search(
+                    query, namespaces=namespaces, privacy=tuple(tier.value for tier in allowed),
+                    limit=limit, include_inactive=include_inactive, include_expired=include_expired,
+                )
+                for hit in semantic_hits:
+                    candidates_by_id.setdefault(hit.item.id, hit.item)
+                    semantic_scores[hit.item.id] = hit.similarity
+            except Exception as error:
+                self.semantic_index.mark_failure(error)
+                _LOG.warning("memory_semantic_search_failed error=%s", type(error).__name__)
         now = datetime.now().astimezone()
         namespace_rank = {value: index for index, value in enumerate(namespaces)}
         ranked: list[tuple[int, float, MemorySearchResult]] = []
-        for item in candidates:
+        for item in candidates_by_id.values():
+            if contains_possible_secret((item.content, item.source, item.namespace, item.metadata)):
+                continue
             words = set(_QUERY_TOKEN.findall(normalize_text(item.content)))
             overlap = len(term_set & words) / max(1, len(term_set))
             phrase = 1.0 if normalized_query and normalized_query in normalize_text(item.content) else 0.0
-            relevance = min(1.0, overlap * 0.8 + phrase * 0.2)
+            lexical_relevance = min(1.0, overlap * 0.8 + phrase * 0.2)
             age_days = max(0.0, (now - datetime.fromisoformat(item.updated_at.replace("Z", "+00:00")).astimezone()).total_seconds() / 86400)
             recency = 1.0 / (1.0 + age_days / 30.0)
-            score = relevance * 0.70 + item.importance * 0.12 + item.confidence * 0.10 + recency * 0.05
+            score = (
+                lexical_relevance * 0.70 + item.importance * 0.12
+                + item.confidence * 0.10 + recency * 0.05
+            )
+            semantic_similarity = semantic_scores.get(item.id)
+            display_relevance = lexical_relevance
+            if semantic_similarity is not None:
+                semantic_score = (
+                    semantic_similarity * 0.75 + lexical_relevance * 0.20
+                    + item.importance * 0.10 + item.confidence * 0.10 + recency * 0.05
+                )
+                score = max(score, min(1.0, semantic_score))
+                display_relevance = max(lexical_relevance, semantic_similarity)
             result = MemorySearchResult(
                 id=item.id, kind=item.kind, content=item.content, privacy=item.privacy,
-                relevance=round(relevance, 4), score=round(score, 4), source=item.source,
+                relevance=round(display_relevance, 4), score=round(score, 4), source=item.source,
                 created_at=item.created_at, updated_at=item.updated_at,
                 last_accessed_at=item.last_accessed_at, expires_at=item.expires_at,
                 namespace=item.namespace, importance=item.importance, confidence=item.confidence,
@@ -319,8 +382,18 @@ class MemoryManager:
         context_privacy = tier if route_backend == "local" else MemoryPrivacy.PUBLIC
         return MemoryContext(text, len(lines), tuple(ids), normalize_namespace(namespace), context_privacy, len(text))
 
+    def semantic_diagnostics(self) -> dict[str, Any]:
+        return self.semantic_index.diagnostics()
+
+    def backfill_semantic_index(self, *, batch_size: int = 32, progress=None) -> dict[str, Any]:
+        return self.semantic_index.backfill(batch_size=batch_size, progress=progress)
+
+    def unload_semantic_model(self) -> None:
+        self.semantic_index.unload_model()
+
     def close(self) -> None:
-        """Close the manager; SQLite handles are already scoped to each operation."""
+        """Release lazy semantic-model memory; SQLite handles are operation-scoped."""
+        self.semantic_index.unload_model()
 
 
 __all__ = ["MemoryManager"]

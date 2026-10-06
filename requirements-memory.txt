@@ -1,0 +1,3 @@
+# Optional local semantic retrieval. Model files are downloaded separately to D:\FRIDAY\models\embeddings.
+model2vec==0.9.0
+sqlite-vec==0.1.9

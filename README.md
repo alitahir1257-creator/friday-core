@@ -79,7 +79,7 @@ FRIDAY's persistent root is `D:\FRIDAY`. SQLite operational memory stays separat
 - Memory: `D:\FRIDAY\data\memory\friday-memory.sqlite3` (`FRIDAY_MEMORY_DB_PATH` overrides it). SQLite/FTS5 retrieval is local and deterministic. An old database under `%LOCALAPPDATA%\FRIDAY\memory` is never migrated or deleted automatically; migrate it manually only if needed.
 - Knowledge: `D:\FRIDAY\vault` (`FRIDAY_VAULT_PATH` overrides it). Notes are ordinary UTF-8 Markdown with optional editable frontmatter and Obsidian-style wikilinks. Vault initialization is explicit; FRIDAY does not import conversations or populate personal data.
 
-Obsidian desktop is optional: no account, login, plugin, or Sync is required. To use its editor later, open `D:\FRIDAY\vault` in Obsidian as a vault. Public/cloud requests can receive only public vault notes; private and local-only knowledge stays on the local PRIVATE route. No remote provider is used for ordinary vault search. Semantic embeddings remain a future optional capability.
+Obsidian desktop is optional: no account, login, plugin, or Sync is required. To use its editor later, open `D:\FRIDAY\vault` in Obsidian as a vault. Public/cloud requests can receive only public vault notes; private and local-only knowledge stays on the local PRIVATE route. No remote provider is used for ordinary vault search. Phase 7C.1 adds an optional local semantic index for persistent SQLite memory; vault and one-off document files are not automatically embedded.
 
 Reserved locations include `D:\FRIDAY\data\research`, `D:\FRIDAY\data\logs`, `D:\FRIDAY\data\cache`, `D:\FRIDAY\models`, `D:\FRIDAY\runtime`, and `D:\FRIDAY\scripts`; existing runtime assets are not moved there automatically.
 
@@ -158,6 +158,24 @@ PDF, DOCX, XLSX, and PPTX parsing uses small format-specific Python libraries in
 Document roots use the same approved-root, symlink, protected-memory/vault, and read-only checks as local files. By default FRIDAY recognizes `D:\FRIDAY\documents` when that directory already exists. Configure additional private roots in `profile.json` with `"document_roots": ["D:\\FRIDAY\\documents", "D:\\Work\\Agreements"]`; explicitly public source roots may be listed separately as `"public_document_roots": ["D:\\PublicDocs"]`. Roots are not created or scanned automatically. Tool paths are root-indexed relative IDs such as `0:agreement.pdf`; path traversal and links are rejected. Private document actions are routed to local Qwen, fail closed when local Qwen is unavailable, and do not add text to Memory, Vault, knowledge context, or public queries. Cross-document web research is available only for explicitly public roots and public requests; local evidence and web evidence are labeled separately, and only the sanitized user query goes to search.
 
 Parsers are read-only and reject macro or executable attachments. XLSX formulas are returned as text with cached values where available; FRIDAY never evaluates formulas or follows external workbook links. Spreadsheet sum, average, min, max, count, and equal-range comparisons are deterministic. Default bounds are 20 MiB per file, 200 PDF pages, 30 workbook sheets, 100 presentation slides, 100 tables, 50,000 worksheet cells, 100,000 extracted characters, and four comparison documents. Office ZIP parts are checked for unsafe paths, excessive expansion, and embedded executable content. Results preserve `DocumentSourceRef` provenance; opening a document never creates persistent memory. Run the deterministic acceptance script with `.venv\Scripts\python.exe -B scripts\phase7b_smoke.py`.
+
+## Lightweight Semantic Memory (Phase 7C.1)
+
+SQLite remains the authoritative memory store and FTS5 remains the keyword-search and failure fallback. Model2Vec produces local CPU embeddings; `sqlite-vec` stores/query-ranks those vectors in the same SQLite database, linked by existing memory IDs. The semantic metadata table stores hashes and scope fields, not a second copy of memory text. Hybrid retrieval deduplicates by memory ID and retains existing namespace, privacy, expiry, status, secret, and ranking filters. Semantic state is reported as `AVAILABLE`, `UNAVAILABLE`, or `DEGRADED`; semantic failures leave FTS5 usable.
+
+The optional pinned packages are `model2vec==0.9.0` and `sqlite-vec==0.1.9`. Install them into the Python 3.11 environment with `.venv\Scripts\python.exe -m pip install -r requirements-memory.txt`. The selected model is `minishlab/potion-base-4M` (English-focused, 128 dimensions; the downloaded local snapshot is about 31.15 MB / 29.71 MiB). Download it once to `D:\FRIDAY\models\embeddings\potion-base-4M` with:
+
+```powershell
+.venv\Scripts\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='minishlab/potion-base-4M', local_dir=r'D:\FRIDAY\models\embeddings\potion-base-4M')"
+```
+
+Constructing `MemoryManager` does not load the model. The first semantic query or an explicit memory write/update that needs an embedding loads it from that local directory. FRIDAY runtime does not fetch models or call embedding services. `MemoryManager.close()` releases the model reference; no idle timer or embedding daemon runs. PRIVATE embeddings, indexing, and lookup stay local.
+
+Set `FRIDAY_SEMANTIC_DISABLED=1` to force FTS5-only retrieval temporarily; writes remain authoritative in SQLite and can be indexed later with the explicit backfill command after the flag is unset.
+
+Semantic backfill is explicit and bounded; it never runs at startup. Run `.venv\Scripts\python.exe -B scripts\phase7c1_backfill.py --batch-size 32` after installing dependencies and the model. Batches are limited to 1–256 active, unexpired rows, commit independently, print counts only, and can be safely rerun after interruption. Existing SQLite memory remains readable during backfill. Secret-detected rows are not embedded. Phase 7B documents and connector files remain ephemeral unless separately saved through the existing authorized memory API.
+
+The English model is not a multilingual-quality guarantee. The single Phase 7C.1 Roman Urdu probe result is recorded by `scripts/phase7c1_smoke.py`; broader Roman Urdu coverage remains unmeasured. Run that offline temporary-database acceptance script to check FTS5 fallback, semantic/hybrid behavior, privacy and lifecycle rules, resumable backfill, resource measurements, and Phase 7B/7A/6B/6A/5 regressions. No large Lighthouse/browser stack, database service, Docker, WSL, or background process is required.
 
 ### API / MCP discovery reference (Phase 7A.1)
 
