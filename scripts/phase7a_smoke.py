@@ -37,6 +37,7 @@ from friday.research.planner import ResearchPlanner  # noqa: E402
 from friday.research.quality import is_duplicate  # noqa: E402
 from friday.research.search import (  # noqa: E402
     BrowserSearchProvider,
+    DDGSSearchProvider,
     SearchProviderError,
     SearXNGSearchProvider,
     _normalize_browser_result_url,
@@ -276,11 +277,51 @@ def main() -> None:
             "FRIDAY_RESEARCH_SEARXNG_URL": "https://search.example",
             "FRIDAY_RESEARCH_BROWSER_SEARCH_ENGINE": "duckduckgo",
         })
-        check("A healthy configured SearXNG is first", [item.name for item in configured] == ["searxng", "browser"])
+        check("A healthy configured SearXNG is first", [item.name for item in configured] == ["searxng", "ddgs", "browser"])
         fallback = configured_search_providers({})
-        check("A SearXNG unset selects the browser fallback", [item.name for item in fallback] == ["browser"] and fallback[0].configured)
+        check("A SearXNG unset selects DDGS before browser fallback", [item.name for item in fallback] == ["ddgs", "browser"] and fallback[1].configured)
         invalid_optional = configured_search_providers({"FRIDAY_RESEARCH_SEARXNG_URL": "file:///etc/passwd"})
-        check("A invalid optional SearXNG is skipped", [item.name for item in invalid_optional] == ["browser"])
+        check("An invalid optional SearXNG is skipped", [item.name for item in invalid_optional] == ["ddgs", "browser"])
+
+        ddgs_calls = {}
+
+        class MockDDGS:
+            def __init__(self, *, timeout):
+                ddgs_calls["timeout"] = timeout
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def text(self, query, **kwargs):
+                ddgs_calls.update(query=query, **kwargs)
+                return [
+                    {"title": "<b>Official Python Docs</b>", "href": "https://docs.python.org/3/?utm_source=ddgs#top", "body": "<em>Official documentation</em>"},
+                    {"title": "Unsafe URL", "href": "javascript:alert(1)", "body": "ignored"},
+                    {"title": "Beyond limit", "href": "https://example.org/", "body": "ignored"},
+                ]
+
+        ddgs_rows = DDGSSearchProvider(ddgs_factory=MockDDGS).search(
+            "official Python documentation", limit=2, timeout_seconds=3.5,
+        )
+        check("A DDGS uses bounded direct Bing search and normalizes its output", (
+            len(ddgs_rows) == 1
+            and ddgs_rows[0].title == "Official Python Docs"
+            and ddgs_rows[0].url == "https://docs.python.org/3/?utm_source=ddgs"
+            and ddgs_rows[0].snippet == "Official documentation"
+            and ddgs_rows[0].source == "ddgs"
+            and ddgs_rows[0].rank == 1
+            and ddgs_calls == {
+                "timeout": 3,
+                "query": "official Python documentation",
+                "region": "us-en",
+                "safesearch": "moderate",
+                "max_results": 2,
+                "backend": "bing",
+            }
+        ))
         check("A browser search strips tracking and unwraps result URLs", _normalize_browser_result_url(
             "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.python.org%2F3%2F%3Futm_source%3Dddg%26v%3D1&rut=x",
             "duckduckgo", "https://html.duckduckgo.com/html/?q=python",
@@ -288,11 +329,21 @@ def main() -> None:
         unconfigured = ResearchEngine(search_providers=(), fetcher=fixture.fetcher).run("Research bounded fixture evidence")
         check("A explicitly empty provider list reports configuration required", unconfigured.status == ResearchStatus.SEARCH_CONFIGURATION_REQUIRED)
         browser_fallback = FixtureBrowserSearchProvider([result(base + "/official")])
+
+        class UnavailableDDGS:
+            def __init__(self, **_kwargs):
+                raise RuntimeError("DDGS unavailable")
+
+        unavailable_ddgs = DDGSSearchProvider(ddgs_factory=UnavailableDDGS)
+        ddgs_fallback = ResearchEngine(
+            search_providers=(unavailable_ddgs, browser_fallback), fetcher=fixture.fetcher,
+        ).search("Research python documentation")
+        check("A DDGS failure normalizes and falls back to BrowserSearchProvider", bool(ddgs_fallback) and len(browser_fallback.queries) == 1)
         preferred = ResearchEngine(
-            search_providers=(SearXNGSearchProvider("https://search.example", opener=MockOpener()), browser_fallback),
+            search_providers=(SearXNGSearchProvider("https://search.example", opener=MockOpener()), unavailable_ddgs, browser_fallback),
             fetcher=fixture.fetcher,
         ).search("Research python documentation")
-        check("A healthy SearXNG wins before browser fallback", bool(preferred) and not browser_fallback.queries)
+        check("A healthy SearXNG wins before DDGS and browser fallback", bool(preferred) and len(browser_fallback.queries) == 1)
         challenge_run = ResearchEngine(
             search_providers=(FixtureBrowserSearchProvider(error_code="SEARCH_CHALLENGE"),),
             fetcher=fixture.fetcher,

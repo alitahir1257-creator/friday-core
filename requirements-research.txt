@@ -1,0 +1,2 @@
+# Optional direct-library live search; server and MCP extras are not used.
+ddgs>=9,<10

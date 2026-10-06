@@ -1,4 +1,4 @@
-"""Search provider contract with optional SearXNG and browser-backed search."""
+"""Search provider contract with optional SearXNG, DDGS, and browser-backed search."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import re
 import time
 
 from friday.research.models import SearchResult
-from friday.research.urls import normalize_url
+from friday.research.urls import UnsafeResearchURL, normalize_url
 
 
 MAX_SEARCH_RESPONSE_BYTES = 512_000
@@ -30,6 +30,7 @@ _BROWSER_ENGINES = {
         ("html.duckduckgo.com", "duckduckgo.com"),
     ),
 }
+_DDGS_BACKEND = "bing"
 _SEARCH_CHALLENGE = re.compile(
     r"\b(?:captcha|verify (?:that )?you are human|unusual traffic|unusual activity|"
     r"automated requests|security challenge|robot check|access denied)\b",
@@ -183,6 +184,71 @@ class SearXNGSearchProvider:
                     "engines": tuple(str(item)[:100] for item in engines[:8]) if isinstance(engines, Sequence) and not isinstance(engines, (str, bytes)) else (),
                     "elapsed_ms": elapsed_ms,
                 },
+            ))
+        return output
+
+
+class DDGSSearchProvider:
+    """Uses the optional DDGS Python library directly with one explicit backend."""
+
+    name = "ddgs"
+    configured = True
+
+    def __init__(self, *, ddgs_factory=None) -> None:
+        self._ddgs_factory = ddgs_factory
+
+    def search(
+        self,
+        query: str,
+        limit: int = 8,
+        *,
+        timeout_seconds: float = SEARCH_TIMEOUT_SECONDS,
+    ) -> list[SearchResult]:
+        if not isinstance(query, str) or not query.strip() or len(query) > 500:
+            raise SearchProviderError("INVALID_QUERY", "The public search query is invalid.")
+        if isinstance(limit, bool) or not 1 <= limit <= MAX_SEARCH_RESULTS:
+            raise SearchProviderError("INVALID_LIMIT", "Search result limit must be from 1 to 8.")
+        timeout = max(1, min(int(SEARCH_TIMEOUT_SECONDS), int(timeout_seconds)))
+        started = time.perf_counter()
+        try:
+            factory = self._ddgs_factory
+            if factory is None:
+                from ddgs import DDGS
+
+                factory = DDGS
+            with factory(timeout=timeout) as ddgs:
+                rows = ddgs.text(
+                    query.strip(),
+                    region="us-en",
+                    safesearch="moderate",
+                    max_results=limit,
+                    backend=_DDGS_BACKEND,
+                )
+        except Exception:
+            raise SearchProviderError("SEARCH_UNAVAILABLE") from None
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            raise SearchProviderError("SEARCH_INVALID_RESPONSE")
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        output: list[SearchResult] = []
+        for row in rows[:limit]:
+            if not isinstance(row, Mapping):
+                continue
+            title = _plain(row.get("title"), 500)
+            candidate_url = row.get("href", row.get("url"))
+            if not isinstance(candidate_url, str) or not title:
+                continue
+            try:
+                url = normalize_url(candidate_url)
+            except UnsafeResearchURL:
+                continue
+            output.append(SearchResult(
+                title=title,
+                url=url,
+                snippet=_plain(row.get("body", row.get("snippet", "")), 1200),
+                source=self.name,
+                rank=len(output) + 1,
+                metadata={"backend": _DDGS_BACKEND, "elapsed_ms": elapsed_ms},
             ))
         return output
 
@@ -407,5 +473,6 @@ def configured_search_providers(environ: Mapping[str, str] | None = None) -> tup
         provider = None
     if provider is not None and provider.configured:
         providers.append(provider)
+    providers.append(DDGSSearchProvider())
     providers.append(BrowserSearchProvider.from_environment(values))
     return tuple(providers)
