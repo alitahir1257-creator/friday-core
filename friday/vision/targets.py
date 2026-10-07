@@ -20,6 +20,10 @@ def normalize_label(text: str) -> str:
     return _SPACE.sub(" ", _PUNCT.sub(" ", text.casefold())).strip()
 
 
+def _compact_label(text: str) -> str:
+    return normalize_label(text).replace(" ", "")
+
+
 def box_within(box: Box, bounds: Box) -> bool:
     if any(type(v) is not int for v in (*box, *bounds)):
         return False
@@ -125,8 +129,12 @@ def candidates_from_observation(observation: ScreenObservation,
             continue
         label = block.text.strip()
         normalized = normalize_label(label)
+        compact = _compact_label(label)
         match_index = next((i for i, item in enumerate(results)
-                            if item.normalized_label == normalized and _same_place(item.bbox, box)), None)
+                            if (item.normalized_label == normalized
+                                or (item.source in ("UIA", "FUSED")
+                                    and _compact_label(item.label) == compact))
+                            and _same_place(item.bbox, box)), None)
         if match_index is not None:
             item = results[match_index]
             if item.source == "UIA":
@@ -157,6 +165,8 @@ def resolve_target(query: str, observation: ScreenObservation, *,
         exact = query.strip() == item.label
         if exact or normalized == item.normalized_label:
             ranked.append(((0 if uia else 2) + (0 if exact else 1), item))
+        elif item.source == "OCR" and _compact_label(query) == _compact_label(item.label):
+            ranked.append((4, item))
     if not ranked:
         return TargetResolution("NOT_FOUND")
     best = min(rank for rank, _ in ranked)

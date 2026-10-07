@@ -53,6 +53,26 @@ fused = replace(base, uia_elements=(uia("Apply", (95, 95, 90, 40)),),
 d = resolve_target("Apply", fused)
 check("D.fused", d.status == "SUCCESS" and d.target.source == "FUSED"
       and d.target.metadata["provenance"] == ["UIA", "OCR"])
+vision_text = "FRIDAY VISION TARGET TEST"
+ocr_joined = "FRIDAYVISIONTARGETTEST"
+spacing_fused = replace(base,
+    uia_elements=(UiElement(vision_text, "Text", "", VisionSource.UIA, (100, 100, 280, 30)),),
+    ocr_blocks=(OcrBlock(ocr_joined, .98, (100, 100, 280, 30)),))
+spacing_candidates = candidates_from_observation(spacing_fused)
+spacing_resolved = resolve_target(vision_text, spacing_fused)
+check("D2.ocr-spacing-fusion", len(spacing_candidates) == 1
+      and spacing_candidates[0].source == "FUSED"
+      and spacing_candidates[0].metadata["provenance"] == ["UIA", "OCR"]
+      and spacing_resolved.status == "SUCCESS" and spacing_resolved.target.source == "FUSED")
+ocr_spacing_only = replace(spacing_fused, uia_elements=())
+check("D3.ocr-spacing-target", resolve_target(vision_text, ocr_spacing_only).status == "SUCCESS"
+      and resolve_target(vision_text, ocr_spacing_only).target.source == "OCR")
+ocr_spacing_ambiguous = replace(base, ocr_blocks=(
+    OcrBlock(ocr_joined, .98, (80, 80, 120, 24)),
+    OcrBlock(ocr_joined, .97, (300, 80, 120, 24)),
+))
+check("D4.ocr-spacing-ambiguity",
+      resolve_target(vision_text, ocr_spacing_ambiguous).status == "AMBIGUOUS_TARGET")
 dupe = replace(fused, uia_elements=(uia("Apply", (95, 95, 90, 40)),
                                     uia("Apply", (96, 96, 89, 39))))
 check("E.duplicate", len(candidates_from_observation(dupe)) == 1)
