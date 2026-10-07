@@ -1,0 +1,5 @@
+# Optional local voice support; core FRIDAY does not require these packages.
+sherpa-onnx==1.13.8
+piper-tts==1.8.0
+sounddevice>=0.5,<0.6
+sentencepiece>=0.2,<0.3

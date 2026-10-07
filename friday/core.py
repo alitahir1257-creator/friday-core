@@ -69,6 +69,7 @@ class FridayCore:
         self._history = ConversationHistory(max_turns=6)
         self._computer: ComputerController | None = None
         self._vision: VisionManager | None = None
+        self._voice_manager = None
         self.tool_registry = ToolRegistry()
         register_computer_tools(self.tool_registry, self._computer_controller)
         register_vision_tools(self.tool_registry, self._vision_manager)
@@ -121,6 +122,19 @@ class FridayCore:
         """Return safe status metadata for whichever typed decision providers are configured."""
         return self._systemone_manager.status
 
+    def history_snapshot(self) -> list[dict[str, str]]:
+        """Return a bounded copy for an active voice session's normal context."""
+        return self._history.messages()
+
+    @property
+    def voice_manager(self):
+        """Create the optional voice subsystem only when a caller requests it."""
+        if self._voice_manager is None:
+            from friday.voice import VoiceManager
+
+            self._voice_manager = VoiceManager(self)
+        return self._voice_manager
+
     def respond(
         self,
         command: str,
@@ -129,6 +143,7 @@ class FridayCore:
         *,
         dry_run: bool = False,
         approval_callback: Callable[[Any], str] | None = None,
+        history_override: list[dict[str, str]] | None = None,
     ) -> tuple[str, int | None, RoutingDecision]:
         decision = self._router.route(command)
         requested_privacy = (
@@ -310,11 +325,13 @@ class FridayCore:
                 selected_backend="computer",
                 latency_ms=round((time.perf_counter() - started) * 1000, 1),
             )
+            if selection.privacy == PrivacyLevel.PUBLIC:
+                self._history.add_exchange(command, result.summary)
             return result.summary, None, decision
 
         reply = self._brain_manager.respond(
             command,
-            self._history.messages(),
+            history_override if history_override is not None else self._history.messages(),
             on_status,
             request_metadata=request_metadata,
             model_selection=selection,
@@ -431,5 +448,7 @@ class FridayCore:
         return plan(command) if callable(plan) else None
 
     def close(self) -> None:
+        if self._voice_manager is not None:
+            self._voice_manager.close()
         self.mcp.disconnect_all()
         self._brain_manager.close()

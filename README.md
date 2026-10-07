@@ -404,3 +404,17 @@ uncertain outcomes return `ACTION_EXECUTED_UNVERIFIED`. Grounding and actions
 remain local-only; screenshots are not persisted, and observations do not
 write memory or the Obsidian vault. See `scripts/phase8a3_smoke.py` and the
 owned-window acceptance fixture in `tests/scripts/phase8a2_owned_window_acceptance.py`.
+
+## Local voice conversation (Phase 9A)
+
+The optional `FridayCore.voice_manager` is lazy-loaded, so missing microphones, speakers, voice packages, or models do not block text or COMPUTER startup. Its pipeline is:
+
+`Wake word or push-to-talk -> VAD -> local STT -> ConversationSession -> FridayCore / BrainManager -> local TTS -> automatic re-listen`
+
+Install voice-only packages into the project Python environment with `python -m pip install -r requirements-voice.txt`. Download the compact English models to `D:\FRIDAY\models\voice` with `python scripts\install_phase9a_models.py`. The installer checks remote byte sizes, refuses any individual asset above 500 MB, reuses matching files, and never overwrites a mismatched existing file. The only runtime audio cache path is `D:\FRIDAY\data\cache\voice`; microphone audio remains in bounded memory buffers and is not saved by default.
+
+Voice starts only when explicitly requested through `core.voice_manager.start_wake_listening()`, `start_conversation()`, or `start_ptt()`. Push-to-talk uses `start_ptt()` followed by `stop_ptt()`. Wake word is a configurable local Sherpa-ONNX keyword detector; the initial phrase is Friday. openWakeWord is not selected because its shipped models do not provide the requested phrase. Continuous sessions retain a bounded conversation history, re-open listening after each response, and end after 30 seconds without user speech by default. `stop listening`, `that's all`, `goodbye Friday`, and `you can stop` end the session without entering BrainManager.
+
+During speech, a stronger VAD threshold detects barge-in and stops Piper playback; a short post-playback cooldown and conservative near-exact transcript check reduce self-voice loops. Only final transcripts enter FRIDAY's normal routing. Voice requests still pass through BrainManager, ToolRegistry, ApprovalPolicy, and COMPUTER safety. Private and local-only sessions send no audio remotely and preserve the existing local-only BrainManager policy. Voice does not write directly to long-term memory.
+
+Run the deterministic acceptance harness with `.venv\Scripts\python.exe -B scripts\phase9a_smoke.py`. It uses a short, harmless Piper-generated speech WAV fixture checked into `tests/fixtures/voice`; the deterministic checks need no microphone. Run `.venv\Scripts\python.exe -B scripts\phase9a_live_acceptance.py` for the bounded live microphone/speaker and two-turn acceptance. Phase 9B adds identity/personality and voice selection polish; the visual HUD is planned for Phase 10A.
