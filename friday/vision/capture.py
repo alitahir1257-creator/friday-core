@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import tempfile
 
+from friday.vision.evidence import explicit_window_info
 from friday.vision.models import CaptureMetadata, ScreenRegion, utcnow
 
 
@@ -86,6 +87,25 @@ class ScreenCapture:
                 self._sct.close()
             finally:
                 self._sct = None
+
+    def capture_window(self, hwnd: int, *, persist: bool = False) -> CapturedImage:
+        """Capture one explicitly identified, visible top-level window."""
+        _title, bounds = explicit_window_info(hwnd)
+        left, top, width, height = bounds
+        monitors = self._ensure().monitors
+        matches = [
+            (index, monitor) for index, monitor in enumerate(monitors[1:], start=1)
+            if left >= monitor["left"] and top >= monitor["top"]
+            and left + width <= monitor["left"] + monitor["width"]
+            and top + height <= monitor["top"] + monitor["height"]
+        ]
+        if len(matches) != 1:
+            raise CaptureError("The explicit window must fit within one available monitor.")
+        monitor_index, monitor = matches[0]
+        region = ScreenRegion(left - monitor["left"], top - monitor["top"],
+                              width, height, monitor=monitor_index,
+                              label=f"window:{hwnd}")
+        return self.capture(region=region, monitor=monitor_index, persist=persist)
 
     def capture(
         self,

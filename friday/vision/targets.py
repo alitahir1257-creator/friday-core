@@ -141,6 +141,8 @@ def candidates_from_observation(observation: ScreenObservation,
 
 def resolve_target(query: str, observation: ScreenObservation, *,
                    active_window_only: bool = True, max_candidates: int = 5) -> TargetResolution:
+    if observation.status != "SUCCESS":
+        return TargetResolution(observation.status)
     if not query.strip() or max_candidates < 1:
         return TargetResolution("NOT_FOUND")
     if ((not active_window_only and observation.capture_bounds is None) or

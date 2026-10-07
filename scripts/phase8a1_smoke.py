@@ -52,6 +52,14 @@ from friday.tools.models import RiskLevel
 from friday.tools.registry import ToolRegistry
 from friday.tools.vision import observation_to_dict, register_vision_tools
 
+# VisionManager fails closed without a real target; deterministic fake-window
+# cases provide a stable synthetic foreground identity here.
+_FOREGROUND_FIXTURE = patch(
+    "friday.vision.manager.active_window_identity",
+    return_value=(900, (0, 0, 1000, 800)),
+)
+_FOREGROUND_FIXTURE.start()
+
 
 # Import-time coupling guard: importing the vision packages must NOT pull in
 # any computer-control modules. (Lazy in-function reuse of the existing
@@ -458,6 +466,7 @@ check("dialog.summary-shape",
 
 failed = [label for label, passed in checks if not passed]
 print(f"\n{len(checks) - len(failed)}/{len(checks)} checks passed.")
+_FOREGROUND_FIXTURE.stop()
 if failed:
     print("FAILED:", ", ".join(failed))
     sys.exit(1)

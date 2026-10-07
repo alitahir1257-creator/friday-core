@@ -109,3 +109,4 @@ class ScreenObservation:
     capture_bounds: tuple[int, int, int, int] | None = None  # screen coordinates
     window_bounds: tuple[int, int, int, int] | None = None  # screen coordinates
     window_handle: int | None = None
+    status: str = "SUCCESS"

@@ -7,13 +7,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from friday.tools.models import RiskLevel
 from friday.tools.registry import ToolRegistry
 from friday.tools.vision import register_vision_tools
-from friday.vision.models import OcrBlock, ScreenObservation, UiElement, VisionSource
+from friday.capabilities.computer.windows import ControlInfo
+from friday.vision.capture import CapturedImage, ScreenCapture
+from friday.vision.evidence import EvidenceError
+from friday.vision.models import (CaptureMetadata, OcrBlock, ScreenObservation,
+                                 ScreenRegion, UiElement, VisionSource)
 from friday.vision.manager import VisionManager
 from friday.vision.targets import (box_within, candidates_from_observation, local_to_screen,
                                    resolve_target, screen_to_local, screen_to_window,
@@ -78,14 +83,17 @@ check("L.stale", not validate_target(old, current_window=(7, base.window_bounds)
 
 
 class FakeManager:
-    def find_target(self, query, *, active_window_only=True, max_candidates=5):
+    def find_target(self, query, *, active_window_only=True, max_candidates=5,
+                    window_target=None):
+        self.window_target = window_target
         observation = ambiguous if query == "Open" else replace(base, uia_elements=(uia("Save", (100, 100, 80, 30)),))
         return resolve_target(query, observation,
                               active_window_only=active_window_only, max_candidates=max_candidates)
 
 
 registry = ToolRegistry()
-register_vision_tools(registry, FakeManager)
+fake_manager = FakeManager()
+register_vision_tools(registry, lambda: fake_manager)
 tool = registry.get("vision.find_target")
 result = registry.execute("vision.find_target", {"query": "Save"}, caller="planner", privacy="private")
 check("M.tool-registry", tool.risk_level == RiskLevel.READ_ONLY and result.success
@@ -95,6 +103,10 @@ ambiguous_tool = registry.execute("vision.find_target", {"query": "Open"}, calle
 check("M.ambiguous-tool", ambiguous_tool.success and ambiguous_tool.structured_data["status"] == "AMBIGUOUS_TARGET"
       and len(ambiguous_tool.structured_data["candidates"]) == 2
       and set(ambiguous_tool.structured_data["candidates"][0]) == {"label", "source", "bbox", "confidence"})
+explicit_tool = registry.execute("vision.find_target", {"query": "Save", "window": "Fixture"},
+                                 caller="planner")
+check("M.explicit-window-tool", explicit_tool.success and fake_manager.window_target == "Fixture"
+      and explicit_tool.structured_data["status"] == "SUCCESS")
 check("N.privacy", not tool.transmits_data and base.remote_calls == 0)
 check("O.persistence", not hasattr(FakeManager(), "memory")
       and not any("screenshot" in key for key in result.structured_data))
@@ -141,4 +153,125 @@ check("Q.reuse-observation", counting.find_target("Apply", observation=replace(b
       and counting.calls == ["auto", "auto", "always"])
 check("Q.uia-without-screenshot", resolve_target("Save", replace(base, dimensions=None,
       capture_bounds=None, uia_elements=(uia("Save", (100, 100, 80, 30)),))).status == "SUCCESS")
+
+# Explicit HWND observation does not consult foreground state or resolve another window.
+class ExplicitCapture:
+    def __init__(self):
+        self.calls = []
+
+    def capture_window(self, hwnd, *, persist=False):
+        self.calls.append((hwnd, persist))
+        region = ScreenRegion(0, 0, 200, 100, monitor=1, label=f"window:{hwnd}")
+        metadata = CaptureMetadata(200, 100, region, 1, stamp, "synthetic",
+                                  persisted=persist, screen_origin=(10, 20))
+        return CapturedImage(b"synthetic", 200, 100, metadata)
+
+    def close(self):
+        return
+
+
+class ExplicitUIA:
+    handles = []
+
+    def inspect_controls_for_handle(self, hwnd, limit=100):
+        self.handles.append(hwnd)
+        return [ControlInfo("File", "MenuItem", "file", (15, 25, 30, 20), True, True)]
+
+
+explicit_capture, explicit_uia = ExplicitCapture(), ExplicitUIA()
+explicit_manager = VisionManager(capture=explicit_capture)
+with patch("friday.vision.manager.active_window_identity", side_effect=AssertionError("foreground consulted")), \
+     patch("friday.vision.manager.explicit_window_info", side_effect=[
+         ("Notepad", (10, 20, 200, 100)), ("Notepad", (10, 20, 200, 100)),
+     ]):
+    explicit_observation = explicit_manager.observe_window(123, ocr_mode="never",
+                                                           uia_controller=explicit_uia)
+explicit_resolution = explicit_manager.find_target("File", observation=explicit_observation)
+with patch("friday.vision.manager.active_window_identity", side_effect=AssertionError("foreground consulted")), \
+     patch("friday.vision.manager.explicit_window_info", side_effect=[
+         ("Notepad", (10, 20, 200, 100)), ("Notepad", (10, 20, 200, 100))
+     ]), patch("friday.vision.manager.collect_uia", return_value=(
+         UiElement("File", "MenuItem", "file", VisionSource.UIA, (15, 25, 30, 20)),
+     )):
+    explicit_direct_resolution = explicit_manager.find_target("File", window_handle=123)
+explicit_ocr_resolution = explicit_manager.find_target(
+    "FRIDAY VISION TARGET TEST",
+    observation=replace(explicit_observation, uia_elements=(), ocr_blocks=(
+        OcrBlock("FRIDAY VISION TARGET TEST", .97, (12, 14, 70, 12)),
+    )),
+)
+check("R.explicit-hwnd-observation", explicit_observation.status == "SUCCESS"
+      and explicit_observation.window_handle == 123
+      and explicit_observation.window_bounds == (10, 20, 200, 100)
+      and explicit_observation.capture_bounds == (10, 20, 200, 100)
+      and explicit_capture.calls == [(123, False), (123, False)]
+      and explicit_uia.handles == [123]
+      and explicit_resolution.status == "SUCCESS"
+      and explicit_resolution.target.bbox == (15, 25, 30, 20)
+      and box_within(explicit_resolution.target.bbox, explicit_observation.window_bounds)
+      and box_within((explicit_resolution.target.center_x, explicit_resolution.target.center_y, 1, 1),
+                     explicit_resolution.target.bbox)
+      and explicit_direct_resolution.status == "SUCCESS")
+check("R.explicit-window-ocr-coordinates", explicit_ocr_resolution.status == "SUCCESS"
+      and explicit_ocr_resolution.target.bbox == (22, 34, 70, 12)
+      and explicit_ocr_resolution.target.normalized_label == "friday vision target test"
+      and box_within(explicit_ocr_resolution.target.bbox, explicit_observation.window_bounds)
+      and box_within((explicit_ocr_resolution.target.center_x, explicit_ocr_resolution.target.center_y, 1, 1),
+                     explicit_ocr_resolution.target.bbox))
+explicit_manager.close()
+
+with patch("friday.vision.manager.active_window_identity", return_value=None):
+    no_target_manager = VisionManager(capture=ExplicitCapture())
+    required = no_target_manager.observe(ocr_mode="always")
+    required_resolution = no_target_manager.find_target("File")
+    with patch("friday.vision.manager.resolve_visible_window_title", return_value=None):
+        ambiguous_window = no_target_manager.observe(window_target="Duplicate title")
+    check("S.window-target-required", required.status == "WINDOW_TARGET_REQUIRED"
+          and required_resolution.status == "WINDOW_TARGET_REQUIRED"
+          and ambiguous_window.status == "WINDOW_TARGET_REQUIRED"
+          and no_target_manager._capture.calls == [])
+    no_target_manager.close()
+
+title_capture = ExplicitCapture()
+title_manager = VisionManager(capture=title_capture)
+with patch("friday.vision.manager.active_window_identity", return_value=None), \
+     patch("friday.vision.manager.resolve_visible_window_title", return_value=789), \
+     patch("friday.vision.manager.explicit_window_info", side_effect=[
+         ("Notepad", (10, 20, 200, 100)), ("Notepad", (10, 20, 200, 100))
+     ]), patch("friday.vision.manager.collect_uia", return_value=(
+         UiElement("File", "MenuItem", "file", VisionSource.UIA, (15, 25, 30, 20)),
+     )):
+    title_resolution = title_manager.find_target("File", window_target="Notepad")
+check("S.exact-window-fallback", title_resolution.status == "SUCCESS"
+      and title_resolution.target.window_handle == 789
+      and title_capture.calls == [(789, False)])
+title_manager.close()
+
+stale_capture = ExplicitCapture()
+stale_manager = VisionManager(capture=stale_capture)
+with patch("friday.vision.manager.explicit_window_info",
+           side_effect=EvidenceError("stale HWND")):
+    try:
+        stale_manager.observe_window(123)
+        stale_rejected = False
+    except EvidenceError:
+        stale_rejected = True
+check("T.stale-explicit-hwnd", stale_rejected and stale_capture.calls == [])
+stale_manager.close()
+
+window_capture = ScreenCapture()
+window_capture._sct = SimpleNamespace(monitors=[
+    {"left": -1920, "top": 0, "width": 3840, "height": 1080},
+    {"left": -1920, "top": 0, "width": 1920, "height": 1080},
+])
+with patch("friday.vision.capture.explicit_window_info",
+           return_value=("Notepad", (-1800, 100, 400, 200))), \
+     patch.object(ScreenCapture, "capture", return_value="CAPTURED") as bounded_capture:
+    captured = window_capture.capture_window(456)
+check("U.explicit-window-capture-bounds", captured == "CAPTURED"
+      and bounded_capture.call_args.kwargs == {
+          "region": ScreenRegion(120, 100, 400, 200, monitor=1, label="window:456"),
+          "monitor": 1, "persist": False,
+      })
+window_capture._sct = None
 print("PHASE 8A.2 SYNTHETIC: ALL PASS")

@@ -20,7 +20,9 @@ from __future__ import annotations
 import os
 
 from friday.vision.capture import CaptureError, ScreenCapture, validate_region
-from friday.vision.evidence import EvidenceError, active_window_identity, active_window_title, collect_dom, collect_uia
+from friday.vision.evidence import (EvidenceError, active_window_identity,
+                                    active_window_title, collect_dom, collect_uia,
+                                    explicit_window_info, resolve_visible_window_title)
 from friday.vision.fusion import fuse, provenance_labels
 from friday.vision.models import (
     OcrStatus,
@@ -77,11 +79,14 @@ class VisionManager:
         persist_screenshot: bool = False,
         browser=None,
         uia_controller=None,
+        window_handle: int | None = None,
     ) -> ScreenObservation:
         """Build one normalized screen observation. Never raises for backend
         problems; unavailable pieces are reported, not hidden."""
         if ocr_mode not in _OCR_MODES:
             raise ValueError(f"ocr_mode must be one of {_OCR_MODES}.")
+        if window_handle is not None and window_target is not None:
+            raise ValueError("Provide either window_handle or window_target, not both.")
         coerced = _coerce_region(region)
         validate_region(coerced)
 
@@ -89,29 +94,57 @@ class VisionManager:
         png_bytes: bytes | None = None
         dimensions: tuple[int, int] | None = None
         capture_bounds = None
-        window_identity = active_window_identity()
+        window_identity = None if window_handle is not None else active_window_identity()
+        explicit_title = None
+        if window_handle is not None:
+            explicit_title, bounds = explicit_window_info(window_handle)
+            window_identity = (window_handle, bounds)
+        elif window_identity is None and window_target:
+            window_handle = resolve_visible_window_title(window_target)
+            if window_handle is not None:
+                explicit_title, bounds = explicit_window_info(window_handle)
+                window_identity = (window_handle, bounds)
+        if window_identity is None:
+            return ScreenObservation(timestamp=utcnow(), region=None, dimensions=None,
+                                     active_window=None, remote_calls=0,
+                                     status="WINDOW_TARGET_REQUIRED")
+        if window_handle is not None and coerced is not None:
+            raise ValueError("An explicit window handle cannot be combined with a screen region.")
         try:
             try:
-                image = self._capture_backend().capture(
-                    region=coerced, monitor=monitor, persist=persist_screenshot)
+                capture = self._capture_backend()
+                if window_handle is None:
+                    image = capture.capture(region=coerced, monitor=monitor,
+                                            persist=persist_screenshot)
+                else:
+                    image = capture.capture_window(window_handle, persist=persist_screenshot)
                 png_bytes = image.png_bytes
                 dimensions = (image.width, image.height)
                 capture_bounds = (*image.metadata.screen_origin, image.width, image.height)
                 temp_path = image.metadata.temp_path
             except CaptureError:
+                if window_handle is not None:
+                    raise
                 png_bytes, dimensions = None, None
 
             try:
-                uia_elements = collect_uia(window_target, controller=uia_controller)
+                uia_elements = collect_uia(window_target, controller=uia_controller,
+                                           window_handle=window_handle)
             except EvidenceError:
+                if window_handle is not None:
+                    _current_title, current_bounds = explicit_window_info(window_handle)
+                    if window_identity != (window_handle, current_bounds):
+                        raise EvidenceError("The explicit window changed during UIA inspection.")
                 uia_elements = ()
-            if window_target is None:
+            if window_handle is not None:
+                active_window = explicit_title
+            elif window_target is None:
                 active_window = active_window_title()
             else:
                 active_window = window_target
 
             dom_elements: tuple = ()
-            if include_dom:
+            if include_dom and window_handle is None:
                 try:
                     dom_elements = collect_dom(browser=browser)
                 except EvidenceError:
@@ -129,7 +162,11 @@ class VisionManager:
                 ocr_status = OcrStatus.OCR_REQUIRED
 
             fused, fused_text = fuse(uia_elements, dom_elements, ocr_blocks)
-            if window_identity != active_window_identity():
+            if window_handle is not None:
+                _title, current_bounds = explicit_window_info(window_handle)
+                if window_identity != (window_handle, current_bounds):
+                    raise EvidenceError("The explicit window changed during observation.")
+            elif window_identity != active_window_identity():
                 window_identity = None  # foreground changed during observation
             return ScreenObservation(
                 timestamp=utcnow(), region=coerced, dimensions=dimensions,
@@ -148,21 +185,47 @@ class VisionManager:
                 except OSError:
                     pass
 
+    def observe_window(self, hwnd: int, *, include_dom: bool = False,
+                       ocr_mode: str = "auto", persist_screenshot: bool = False,
+                       uia_controller=None) -> ScreenObservation:
+        """Observe only the visible window identified by this explicit HWND."""
+        return self.observe(include_dom=include_dom, ocr_mode=ocr_mode,
+                            persist_screenshot=persist_screenshot,
+                            uia_controller=uia_controller, window_handle=hwnd)
+
     def find_target(self, query: str, *, observation: ScreenObservation | None = None,
-                    active_window_only: bool = True, max_candidates: int = 5):
+                    active_window_only: bool = True, max_candidates: int = 5,
+                    window_handle: int | None = None, window_target: str | None = None):
         """Resolve existing evidence first; collect OCR only after a UIA miss."""
-        from friday.vision.targets import resolve_target
+        from friday.vision.targets import TargetResolution, resolve_target
 
         if observation is not None:
             return resolve_target(query, observation, active_window_only=active_window_only,
                                   max_candidates=max_candidates)
-        observed = self.observe(ocr_mode="auto")
+        if window_handle is not None and window_target is not None:
+            raise ValueError("Provide either window_handle or window_target, not both.")
+        if window_handle is not None:
+            observed = self.observe_window(window_handle, ocr_mode="auto")
+        elif window_target is not None:
+            observed = self.observe(window_target=window_target, ocr_mode="auto")
+        else:
+            observed = self.observe(ocr_mode="auto")
+        if observed.status != "SUCCESS":
+            return TargetResolution(observed.status)
         result = resolve_target(query, observed, active_window_only=active_window_only,
                                 max_candidates=max_candidates)
         if result.status != "NOT_FOUND" or observed.ocr_blocks:
             return result
-        return resolve_target(query, self.observe(ocr_mode="always"),
-                              active_window_only=active_window_only, max_candidates=max_candidates)
+        if window_handle is not None:
+            fallback = self.observe_window(window_handle, ocr_mode="always")
+        elif window_target is not None:
+            fallback = self.observe(window_target=window_target, ocr_mode="always")
+        else:
+            fallback = self.observe(ocr_mode="always")
+        if fallback.status != "SUCCESS":
+            return TargetResolution(fallback.status)
+        return resolve_target(query, fallback, active_window_only=active_window_only,
+                              max_candidates=max_candidates)
 
     def close(self) -> None:
         """Release backends so RAM returns to the OS."""

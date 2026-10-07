@@ -68,6 +68,26 @@ class WindowController:
 
     def inspect_controls(self, target: str, limit: int = 100) -> list[ControlInfo]:
         window = self._window(target)
+        return self._inspect_controls(window, limit)
+
+    def inspect_controls_for_handle(self, hwnd: int, limit: int = 100) -> list[ControlInfo]:
+        if type(hwnd) is not int or hwnd <= 0:
+            raise ControlResolutionError("A valid explicit window handle is required.")
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.IsWindow.argtypes = (ctypes.c_void_p,)
+        user32.IsWindow.restype = ctypes.c_int
+        user32.IsWindowVisible.argtypes = (ctypes.c_void_p,)
+        user32.IsWindowVisible.restype = ctypes.c_int
+        handle = ctypes.c_void_p(hwnd)
+        if not user32.IsWindow(handle) or not user32.IsWindowVisible(handle):
+            raise ControlResolutionError("The explicit window handle is stale or hidden.")
+        window = self._desktop.window(handle=hwnd).wrapper_object()
+        if window.handle != hwnd or not user32.IsWindow(handle) or not user32.IsWindowVisible(handle):
+            raise ControlResolutionError("The explicit UIA root no longer matches the target window.")
+        return self._inspect_controls(window, limit)
+
+    @staticmethod
+    def _inspect_controls(window, limit: int) -> list[ControlInfo]:
         result: list[ControlInfo] = []
         for control in window.descendants():
             info = control.element_info

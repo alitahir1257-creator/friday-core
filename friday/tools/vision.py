@@ -56,6 +56,7 @@ def observation_to_dict(observation) -> dict[str, Any]:
     """Structured observation for tool results. No raw image bytes, ever."""
     region = observation.region
     return {
+        "status": observation.status,
         "timestamp": observation.timestamp,
         "region": None if region is None else {
             "x": region.x, "y": region.y, "width": region.width,
@@ -136,6 +137,7 @@ def register_vision_tools(
             ocr_mode=args.get("ocr_mode", "auto"),
         )
         return {
+            "status": observation.status,
             "text": observation.fused_text,
             "sources": sorted({item.split(":", 1)[0] for item in observation.provenance if ":" in item}),
             "ocr_status": observation.ocr_status.value,
@@ -156,10 +158,13 @@ def register_vision_tools(
     ))
 
     def find_target(args: dict[str, Any], _context: ToolInvocationContext) -> dict[str, Any]:
-        result = vision_provider().find_target(
-            args["query"], active_window_only=not args.get("screen_wide", False),
-            max_candidates=args.get("max_candidates", 5),
-        )
+        options = {
+            "active_window_only": not args.get("screen_wide", False),
+            "max_candidates": args.get("max_candidates", 5),
+        }
+        if "window" in args:
+            options["window_target"] = args["window"]
+        result = vision_provider().find_target(args["query"], **options)
         return {"status": result.status,
                 "target": _target_to_dict(result.target) if result.target else None,
                 "candidates": [_candidate_to_dict(item) for item in result.candidates]}
@@ -169,6 +174,7 @@ def register_vision_tools(
         description="Find a visible screen target by exact or normalized text; local and read-only.",
         input_schema={"type": "object", "properties": {
             "query": {"type": "string", "minLength": 1, "maxLength": 260},
+            "window": {"type": "string", "minLength": 1, "maxLength": 260},
             "screen_wide": {"type": "boolean"},
             "max_candidates": {"type": "integer", "minimum": 1, "maximum": 20},
         }, "required": ["query"], "additionalProperties": False},
