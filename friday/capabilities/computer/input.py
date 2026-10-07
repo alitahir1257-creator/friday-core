@@ -35,6 +35,11 @@ class InputController:
     def type_text(self, value: str) -> str:
         if len(value) > 10000:
             raise ValueError("Text is too long for one action.")
+        if value and all(char.isascii() and (char.isalnum() or char == " ") for char in value):
+            # ponytail: plain ASCII words use virtual keys; punctuation escaping can extend this path if needed.
+            from pywinauto.keyboard import send_keys
+            send_keys(value, with_spaces=True, vk_packet=False)
+            return "Text entered."
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
         user32.SendInput.restype = wintypes.UINT
