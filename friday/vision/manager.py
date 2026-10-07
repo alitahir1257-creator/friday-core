@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 
 from friday.vision.capture import CaptureError, ScreenCapture, validate_region
-from friday.vision.evidence import EvidenceError, active_window_title, collect_dom, collect_uia
+from friday.vision.evidence import EvidenceError, active_window_identity, active_window_title, collect_dom, collect_uia
 from friday.vision.fusion import fuse, provenance_labels
 from friday.vision.models import (
     OcrStatus,
@@ -88,12 +88,15 @@ class VisionManager:
         temp_path: str | None = None
         png_bytes: bytes | None = None
         dimensions: tuple[int, int] | None = None
+        capture_bounds = None
+        window_identity = active_window_identity()
         try:
             try:
                 image = self._capture_backend().capture(
                     region=coerced, monitor=monitor, persist=persist_screenshot)
                 png_bytes = image.png_bytes
                 dimensions = (image.width, image.height)
+                capture_bounds = (*image.metadata.screen_origin, image.width, image.height)
                 temp_path = image.metadata.temp_path
             except CaptureError:
                 png_bytes, dimensions = None, None
@@ -126,12 +129,17 @@ class VisionManager:
                 ocr_status = OcrStatus.OCR_REQUIRED
 
             fused, fused_text = fuse(uia_elements, dom_elements, ocr_blocks)
+            if window_identity != active_window_identity():
+                window_identity = None  # foreground changed during observation
             return ScreenObservation(
                 timestamp=utcnow(), region=coerced, dimensions=dimensions,
                 active_window=active_window, uia_elements=uia_elements,
                 dom_elements=dom_elements, ocr_blocks=ocr_blocks,
                 fused_text=fused_text, ocr_status=ocr_status, remote_calls=0,
                 provenance=provenance_labels(fused),
+                capture_bounds=capture_bounds,
+                window_bounds=window_identity[1] if window_identity else None,
+                window_handle=window_identity[0] if window_identity else None,
             )
         finally:
             if temp_path:
@@ -139,6 +147,22 @@ class VisionManager:
                     os.unlink(temp_path)
                 except OSError:
                     pass
+
+    def find_target(self, query: str, *, observation: ScreenObservation | None = None,
+                    active_window_only: bool = True, max_candidates: int = 5):
+        """Resolve existing evidence first; collect OCR only after a UIA miss."""
+        from friday.vision.targets import resolve_target
+
+        if observation is not None:
+            return resolve_target(query, observation, active_window_only=active_window_only,
+                                  max_candidates=max_candidates)
+        observed = self.observe(ocr_mode="auto")
+        result = resolve_target(query, observed, active_window_only=active_window_only,
+                                max_candidates=max_candidates)
+        if result.status != "NOT_FOUND" or observed.ocr_blocks:
+            return result
+        return resolve_target(query, self.observe(ocr_mode="always"),
+                              active_window_only=active_window_only, max_candidates=max_candidates)
 
     def close(self) -> None:
         """Release backends so RAM returns to the OS."""

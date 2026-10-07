@@ -23,6 +23,9 @@ def active_window_title() -> str | None:
         from ctypes import wintypes
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+        user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
             return None
@@ -33,6 +36,24 @@ def active_window_title() -> str | None:
         user32.GetWindowTextW(hwnd, buffer, length + 1)
         title = buffer.value.strip()
         return title or None
+    except Exception:
+        return None
+
+
+def active_window_identity() -> tuple[int, tuple[int, int, int, int]] | None:
+    """Foreground HWND and its screen rectangle; no UIA or screenshot needed."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+        hwnd = user32.GetForegroundWindow()
+        rect = wintypes.RECT()
+        if not hwnd or not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        return int(hwnd), (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
     except Exception:
         return None
 
@@ -65,7 +86,10 @@ def collect_uia(window_target: str | None = None, limit: int = 100,
         if not name and not identifier:
             continue
         elements.append(UiElement(name=name, kind=kind, identifier=identifier,
-                                  source=VisionSource.UIA))
+                                  source=VisionSource.UIA,
+                                  bbox=getattr(control, "bbox", None),
+                                  visible=getattr(control, "visible", True),
+                                  enabled=getattr(control, "enabled", None)))
     return tuple(elements)
 
 

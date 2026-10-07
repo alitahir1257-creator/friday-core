@@ -13,6 +13,7 @@ from typing import Any
 from friday.tools.models import RiskLevel, ToolDefinition, ToolInvocationContext
 from friday.tools.registry import ToolRegistry
 from friday.vision.manager import VisionManager
+from friday.vision.targets import GroundedTarget
 
 
 _PRIVACY = frozenset({"public", "private", "local_only"})
@@ -46,7 +47,9 @@ _OBSERVE_SCHEMA = {
 
 def _element_to_dict(element) -> dict[str, Any]:
     return {"name": element.name, "kind": element.kind,
-            "identifier": element.identifier, "source": element.source.value}
+            "identifier": element.identifier, "source": element.source.value,
+            "bbox": None if element.bbox is None else list(element.bbox),
+            "visible": element.visible, "enabled": element.enabled}
 
 
 def observation_to_dict(observation) -> dict[str, Any]:
@@ -60,6 +63,9 @@ def observation_to_dict(observation) -> dict[str, Any]:
         },
         "dimensions": None if observation.dimensions is None else list(observation.dimensions),
         "active_window": observation.active_window,
+        "capture_bounds": None if observation.capture_bounds is None else list(observation.capture_bounds),
+        "window_bounds": None if observation.window_bounds is None else list(observation.window_bounds),
+        "window_handle": observation.window_handle,
         "uia_elements": [_element_to_dict(item) for item in observation.uia_elements],
         "dom_elements": [_element_to_dict(item) for item in observation.dom_elements],
         "ocr_blocks": [
@@ -74,6 +80,23 @@ def observation_to_dict(observation) -> dict[str, Any]:
         "notice": observation.notice,
         "provenance": list(observation.provenance),
     }
+
+
+def _target_to_dict(target: GroundedTarget) -> dict[str, Any]:
+    return {
+        "id": target.id, "label": target.label, "normalized_label": target.normalized_label,
+        "bbox": list(target.bbox), "center": [target.center_x, target.center_y],
+        "source": target.source, "confidence": target.confidence,
+        "window_title": target.window_title, "visible": target.visible,
+        "enabled": target.enabled, "control_type": target.control_type,
+        "observation_timestamp": target.observation_timestamp,
+        "window_handle": target.window_handle, "metadata": target.metadata,
+    }
+
+
+def _candidate_to_dict(target: GroundedTarget) -> dict[str, Any]:
+    return {"label": target.label, "source": target.source,
+            "bbox": list(target.bbox), "confidence": target.confidence}
 
 
 def register_vision_tools(
@@ -130,4 +153,26 @@ def register_vision_tools(
         privacy_support=_PRIVACY, source="native",
         side_effects="none", transmits_data=False,
         timeout_seconds=60.0,
+    ))
+
+    def find_target(args: dict[str, Any], _context: ToolInvocationContext) -> dict[str, Any]:
+        result = vision_provider().find_target(
+            args["query"], active_window_only=not args.get("screen_wide", False),
+            max_candidates=args.get("max_candidates", 5),
+        )
+        return {"status": result.status,
+                "target": _target_to_dict(result.target) if result.target else None,
+                "candidates": [_candidate_to_dict(item) for item in result.candidates]}
+
+    registry.register(ToolDefinition(
+        name="find_target", namespace="vision",
+        description="Find a visible screen target by exact or normalized text; local and read-only.",
+        input_schema={"type": "object", "properties": {
+            "query": {"type": "string", "minLength": 1, "maxLength": 260},
+            "screen_wide": {"type": "boolean"},
+            "max_candidates": {"type": "integer", "minimum": 1, "maximum": 20},
+        }, "required": ["query"], "additionalProperties": False},
+        handler=find_target, capabilities=frozenset({"computer", "vision"}),
+        risk_level=RiskLevel.READ_ONLY, privacy_support=_PRIVACY, source="native",
+        side_effects="none", transmits_data=False, timeout_seconds=60.0,
     ))

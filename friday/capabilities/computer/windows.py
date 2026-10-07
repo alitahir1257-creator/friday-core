@@ -17,6 +17,9 @@ class ControlInfo:
     name: str
     control_type: str
     automation_id: str
+    bbox: tuple[int, int, int, int] | None = None
+    visible: bool = True
+    enabled: bool | None = None
 
 
 class WindowController:
@@ -69,7 +72,14 @@ class WindowController:
         for control in window.descendants():
             info = control.element_info
             if info.name or info.automation_id:
-                result.append(ControlInfo(info.name or "", info.control_type or "", info.automation_id or ""))
+                try:
+                    rect = info.rectangle
+                    box = (rect.left, rect.top, rect.width(), rect.height()) if rect else None
+                    visible, enabled = bool(control.is_visible()), bool(control.is_enabled())
+                except Exception:
+                    box, visible, enabled = None, True, None
+                result.append(ControlInfo(info.name or "", info.control_type or "", info.automation_id or "",
+                                          box, visible, enabled))
             if len(result) >= limit:
                 break
         return result

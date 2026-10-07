@@ -71,6 +71,9 @@ class UiElement:
     kind: str  # UIA control_type or DOM role
     identifier: str  # automation_id, or "" when unavailable
     source: VisionSource
+    bbox: tuple[int, int, int, int] | None = None  # screen x, y, width, height
+    visible: bool = True
+    enabled: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,7 @@ class CaptureMetadata:
     backend: str
     persisted: bool = False
     temp_path: str | None = None
+    screen_origin: tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True)
@@ -102,3 +106,6 @@ class ScreenObservation:
     trust: str = "untrusted"
     notice: str = UNTRUSTED_DATA_NOTICE
     provenance: tuple[str, ...] = field(default_factory=tuple)
+    capture_bounds: tuple[int, int, int, int] | None = None  # screen coordinates
+    window_bounds: tuple[int, int, int, int] | None = None  # screen coordinates
+    window_handle: int | None = None

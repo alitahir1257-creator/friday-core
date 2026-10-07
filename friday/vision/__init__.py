@@ -18,6 +18,7 @@ from friday.vision.models import (
     UiElement,
     VisionSource,
 )
+from friday.vision.targets import GroundedTarget, TargetResolution, resolve_target, validate_target
 
 
 def create_vision_manager() -> VisionManager:
@@ -34,6 +35,10 @@ __all__ = [
     "UiElement",
     "VisionManager",
     "VisionSource",
+    "GroundedTarget",
+    "TargetResolution",
+    "resolve_target",
+    "validate_target",
     "create_vision_manager",
     "summarize_dialog",
 ]

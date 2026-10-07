@@ -357,5 +357,31 @@ real capture, UIA, OCR, a known Notepad line, dialog evidence, cleanup,
 latency, and RAM. Results from GitHub alone must be reported as
 **LOCAL_ACCEPTANCE_REQUIRED**, never as passed.
 
-Limitations: no coordinate fallback yet (Phase 8A scope), no visual
-targeting model, OCR quality unvalidated on the target machine, no video.
+## Deterministic screen targets (Phase 8A.2)
+
+Capture -> UIA -> local OCR fallback -> spatial/text fusion -> target resolution.
+`vision.find_target` is a local READ_ONLY ToolRegistry tool. It searches the
+active window by default and returns a label, screen-pixel `(x, y, width,
+height)` box, center, source, confidence, and ambiguity status. Screen-wide
+search requires `screen_wide=true`. UIA identity wins when UIA and OCR agree
+on both text and location; duplicate or equally ranked matches fail with
+`AMBIGUOUS_TARGET`. No click follows discovery. Before a future COMPUTER action,
+`validate_target` checks observation age, foreground window identity, and
+current window rectangle. OCR boxes use screenshot-local coordinates and are
+translated to screen coordinates using the capture origin; window-relative
+coordinates use the window's screen origin. Screenshots, observations, and
+targets are not automatically persisted or sent to a remote vision model.
+
+Reference audit: [OmniParser](https://github.com/microsoft/OmniParser) can
+detect visual-only controls, but its V2 caption weight alone is 1.08 GB and
+UFO documents its OmniParser backend as GPU-requiring and slow. The repository
+is CC BY 4.0; current V2 detector and caption weights are MIT, while older
+Ultralytics detectors retain AGPL terms. [UFO](https://github.com/microsoft/UFO)
+is MIT and validates a UIA-first approach, but its full agent stack has many
+dependencies and model/API configuration. [UI-TARS](https://github.com/bytedance/UI-TARS)
+and its 7B model are Apache 2.0; the published deployment examples use vLLM
+or SGLang and GPU containers. None is needed for 8A.2 or suitable as a
+permanent background process on the 8 GB Latitude 7490. For a future optional
+semantic backend, first evaluate an on-demand OmniParser detector against a
+measured local RAM/latency budget; keep the present UIA/OCR resolver as the
+default. See `scripts/phase8a2_smoke.py` and `scripts/phase8a2_live_acceptance.py`.

@@ -139,5 +139,6 @@ class ScreenCapture:
             width=shot.width, height=shot.height, region=used_region,
             monitor=monitor, timestamp=utcnow(), backend=self.backend,
             persisted=persist, temp_path=temp_path,
+            screen_origin=(grab_box["left"], grab_box["top"]),
         )
         return CapturedImage(png_bytes, shot.width, shot.height, metadata)
