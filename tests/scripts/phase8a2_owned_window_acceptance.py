@@ -22,6 +22,7 @@ from typing import Any
 
 
 TITLE = "FRIDAY Vision Acceptance"
+ACTION_TITLE = "FRIDAY Visual Action Acceptance"
 VISION_TEXT = "FRIDAY VISION TARGET TEST"
 WINDOW_WIDTH = 620
 WINDOW_HEIGHT = 230
@@ -60,7 +61,7 @@ def _fixture_window_class():
     return callback_type, WNDCLASSW
 
 
-def _run_fixture() -> int:
+def _run_fixture(phase8a3: bool = False) -> int:
     if os.name != "nt":
         return 2
 
@@ -77,8 +78,10 @@ def _run_fixture() -> int:
     user32.DefWindowProcW.restype = ctypes.c_ssize_t
     user32.PostQuitMessage.argtypes = (ctypes.c_int,)
     callback_type, WNDCLASSW = _fixture_window_class()
-    class_name = "FridayVisionAcceptanceFixture"
+    title = ACTION_TITLE if phase8a3 else TITLE
+    class_name = "FridayVisualActionAcceptanceFixture" if phase8a3 else "FridayVisionAcceptanceFixture"
     WM_DESTROY = 0x0002
+    WM_COMMAND = 0x0111
     WM_SETFONT = 0x0030
     WS_OVERLAPPEDWINDOW = 0x00CF0000
     WS_CHILD = 0x40000000
@@ -86,14 +89,26 @@ def _run_fixture() -> int:
     SS_CENTER = 0x00000001
     SS_CENTERIMAGE = 0x00000200
     SW_SHOWNOACTIVATE = 4
+    SW_SHOW = 5
     SWP_NOACTIVATE = 0x0010
     SWP_SHOWWINDOW = 0x0040
     HWND_TOPMOST = ctypes.c_void_p(-1)
+    status_control = None
 
     @callback_type
     def window_proc(hwnd, message, wparam, lparam):
         if message == WM_DESTROY:
             user32.PostQuitMessage(0)
+            return 0
+        if phase8a3 and message == WM_COMMAND and status_control:
+            status = {
+                1002: "STATUS: SAVE TEST CLICKED",
+                1003: "STATUS: SETTINGS CLICKED",
+                1005: "STATUS: SUBMIT TEST CLICKED",
+                1006: "STATUS: DELETE TEST CLICKED",
+            }.get(wparam & 0xFFFF)
+            if status:
+                user32.SetWindowTextW(status_control, status)
             return 0
         return user32.DefWindowProcW(hwnd, message, wparam, lparam)
 
@@ -116,6 +131,7 @@ def _run_fixture() -> int:
     )
     user32.CreateWindowExW.restype = wintypes.HWND
     user32.SendMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    user32.SetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPCWSTR)
     user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
     user32.UpdateWindow.argtypes = (wintypes.HWND,)
     user32.SetWindowPos.argtypes = (
@@ -141,9 +157,10 @@ def _run_fixture() -> int:
     screen_height = user32.GetSystemMetrics(1)
     x = max(0, (screen_width - WINDOW_WIDTH) // 2)
     y = max(0, (screen_height - WINDOW_HEIGHT) // 3)
+    window_width, window_height = (680, 390) if phase8a3 else (WINDOW_WIDTH, WINDOW_HEIGHT)
     hwnd = user32.CreateWindowExW(
-        0, class_name, TITLE, WS_OVERLAPPEDWINDOW,
-        x, y, WINDOW_WIDTH, WINDOW_HEIGHT,
+        0, class_name, title, WS_OVERLAPPEDWINDOW,
+        x, y, window_width, window_height,
         None, None, instance, None,
     )
     if not hwnd:
@@ -157,27 +174,55 @@ def _run_fixture() -> int:
     )
     try:
         label = user32.CreateWindowExW(
-            0, "STATIC", VISION_TEXT, WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
-            24, 28, 556, 48, hwnd, ctypes.c_void_p(1001), instance, None,
+            0, "STATIC", "STATUS: READY" if phase8a3 else VISION_TEXT,
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+            24, 24, 616 if phase8a3 else 556, 48, hwnd, ctypes.c_void_p(1001), instance, None,
         )
+        status_control = label if phase8a3 else None
+        save_x = 88 if phase8a3 else 142
+        settings_x = 254 if phase8a3 else 330
         save_button = user32.CreateWindowExW(
             0, "BUTTON", "Save Test", WS_CHILD | WS_VISIBLE,
-            142, 112, 148, 44, hwnd, ctypes.c_void_p(1002), instance, None,
+            save_x, 100 if phase8a3 else 112, 148, 44, hwnd, ctypes.c_void_p(1002), instance, None,
         )
         settings_button = user32.CreateWindowExW(
             0, "BUTTON", "Settings", WS_CHILD | WS_VISIBLE,
-            330, 112, 148, 44, hwnd, ctypes.c_void_p(1003), instance, None,
+            settings_x, 100 if phase8a3 else 112, 148, 44, hwnd, ctypes.c_void_p(1003), instance, None,
         )
-        if not all((label, save_button, settings_button)):
+        extra_controls = []
+        if phase8a3:
+            extra_controls.extend([
+                user32.CreateWindowExW(
+                    0, "EDIT", "FRIDAY INPUT", WS_CHILD | WS_VISIBLE | 0x00010000 | 0x0080,
+                    420, 100, 220, 44, hwnd, ctypes.c_void_p(1004), instance, None,
+                ),
+                user32.CreateWindowExW(
+                    0, "BUTTON", "Submit Test", WS_CHILD | WS_VISIBLE,
+                    88, 164, 148, 44, hwnd, ctypes.c_void_p(1005), instance, None,
+                ),
+                user32.CreateWindowExW(
+                    0, "BUTTON", "Delete Test", WS_CHILD | WS_VISIBLE,
+                    254, 164, 148, 44, hwnd, ctypes.c_void_p(1006), instance, None,
+                ),
+                user32.CreateWindowExW(
+                    0, "BUTTON", "Open", WS_CHILD | WS_VISIBLE,
+                    88, 228, 148, 44, hwnd, ctypes.c_void_p(1007), instance, None,
+                ),
+                user32.CreateWindowExW(
+                    0, "BUTTON", "Open", WS_CHILD | WS_VISIBLE,
+                    254, 228, 148, 44, hwnd, ctypes.c_void_p(1008), instance, None,
+                ),
+            ])
+        if not all((label, save_button, settings_button, *extra_controls)):
             user32.DestroyWindow(hwnd)
             return 5
         user32.SendMessageW(label, WM_SETFONT, font, 1)
         user32.SendMessageW(save_button, WM_SETFONT, button_font, 1)
         user32.SendMessageW(settings_button, WM_SETFONT, button_font, 1)
-        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+        user32.ShowWindow(hwnd, SW_SHOW if phase8a3 else SW_SHOWNOACTIVATE)
         user32.SetWindowPos(
-            hwnd, HWND_TOPMOST, x, y, WINDOW_WIDTH, WINDOW_HEIGHT,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            hwnd, HWND_TOPMOST, x, y, window_width, window_height,
+            (SWP_SHOWWINDOW if phase8a3 else SWP_NOACTIVATE | SWP_SHOWWINDOW),
         )
         user32.UpdateWindow(hwnd)
         user32.IsWindowVisible.argtypes = (wintypes.HWND,)
@@ -187,7 +232,7 @@ def _run_fixture() -> int:
         user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
         title_buffer = ctypes.create_unicode_buffer(user32.GetWindowTextLengthW(hwnd) + 1)
         user32.GetWindowTextW(hwnd, title_buffer, len(title_buffer))
-        own_matches = _matching_windows(os.getpid())
+        own_matches = _matching_windows(os.getpid(), title)
         fixture_report = {
             "pid": os.getpid(), "hwnd": int(hwnd), "title": title_buffer.value,
             "visible": bool(user32.IsWindowVisible(hwnd)), "matching_hwnds": own_matches,
@@ -238,9 +283,9 @@ def _windows_for_pid(pid: int) -> list[dict[str, Any]]:
     return windows
 
 
-def _matching_windows(pid: int) -> list[int]:
+def _matching_windows(pid: int, title: str = TITLE) -> list[int]:
     return [window["hwnd"] for window in _windows_for_pid(pid)
-            if window["visible"] and window["title"] == TITLE]
+            if window["visible"] and window["title"] == title]
 
 
 def _window_is_live(hwnd: int | None) -> bool:
@@ -736,7 +781,7 @@ def _main_acceptance() -> dict[str, Any]:
 
 if __name__ == "__main__":
     if "--fixture" in sys.argv:
-        raise SystemExit(_run_fixture())
+        raise SystemExit(_run_fixture(phase8a3="--phase8a3" in sys.argv))
 
     project_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(project_root))

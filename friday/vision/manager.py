@@ -57,6 +57,7 @@ class VisionManager:
                  ocr: OcrEngine | None = None) -> None:
         self._capture = capture
         self._ocr = ocr
+        self._grounded_targets: dict[str, tuple[object, ScreenObservation]] = {}
 
     def _capture_backend(self) -> ScreenCapture:
         if self._capture is None:
@@ -200,8 +201,9 @@ class VisionManager:
         from friday.vision.targets import TargetResolution, resolve_target
 
         if observation is not None:
-            return resolve_target(query, observation, active_window_only=active_window_only,
-                                  max_candidates=max_candidates)
+            result = resolve_target(query, observation, active_window_only=active_window_only,
+                                    max_candidates=max_candidates)
+            return self._remember_target(result, observation)
         if window_handle is not None and window_target is not None:
             raise ValueError("Provide either window_handle or window_target, not both.")
         if window_handle is not None:
@@ -215,7 +217,7 @@ class VisionManager:
         result = resolve_target(query, observed, active_window_only=active_window_only,
                                 max_candidates=max_candidates)
         if result.status != "NOT_FOUND" or observed.ocr_blocks:
-            return result
+            return self._remember_target(result, observed)
         if window_handle is not None:
             fallback = self.observe_window(window_handle, ocr_mode="always")
         elif window_target is not None:
@@ -224,11 +226,32 @@ class VisionManager:
             fallback = self.observe(ocr_mode="always")
         if fallback.status != "SUCCESS":
             return TargetResolution(fallback.status)
-        return resolve_target(query, fallback, active_window_only=active_window_only,
-                              max_candidates=max_candidates)
+        result = resolve_target(query, fallback, active_window_only=active_window_only,
+                                max_candidates=max_candidates)
+        return self._remember_target(result, fallback)
+
+    def _remember_target(self, result, observation: ScreenObservation):
+        if result.status == "SUCCESS" and result.target is not None:
+            self._grounded_targets[result.target.id] = (result.target, observation)
+            while len(self._grounded_targets) > 128:
+                self._grounded_targets.pop(next(iter(self._grounded_targets)))
+        return result
+
+    def grounded_target(self, target_id: str, observation_id: str | None = None):
+        """Return only targets created by this manager's local resolver."""
+        cached = self._grounded_targets.get(target_id)
+        if cached is None:
+            return None
+        target, _observation = cached
+        return target if observation_id is None or target.observation_timestamp == observation_id else None
+
+    def observation_for_target(self, target_id: str):
+        cached = self._grounded_targets.get(target_id)
+        return cached[1] if cached is not None else None
 
     def close(self) -> None:
         """Release backends so RAM returns to the OS."""
+        self._grounded_targets.clear()
         if self._capture is not None:
             try:
                 self._capture.close()

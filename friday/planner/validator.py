@@ -22,7 +22,7 @@ from friday.planner.models import (
 
 _STEP_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _BASE_CAPABILITIES = {
-    "general", "research", "coding", "computer", "browser", "input", "window",
+    "general", "research", "coding", "computer", "browser", "input", "window", "vision",
     "knowledge", "memory", "filesystem", "mcp", "weather", "currency", "holidays", "public_api",
 }
 _VERIFICATIONS = {"tool_success", "non_empty", "numeric_result", "window_exists"}
@@ -31,7 +31,7 @@ _FORBIDDEN_TOOL_PARTS = {
 }
 _FORBIDDEN_CAPABILITIES = _FORBIDDEN_TOOL_PARTS | {"command_execution", "code_execution"}
 _PROFILE_CAPABILITIES = {
-    WorkerProfile.COMPUTER: {"computer", "browser", "input", "window"},
+    WorkerProfile.COMPUTER: {"computer", "browser", "input", "window", "vision"},
     WorkerProfile.KNOWLEDGE: {"knowledge", "memory", "filesystem"},
     WorkerProfile.RESEARCH: {"research", "weather", "currency", "holidays"},
     WorkerProfile.CODING: {"coding"},

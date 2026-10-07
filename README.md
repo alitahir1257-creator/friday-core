@@ -385,3 +385,22 @@ permanent background process on the 8 GB Latitude 7490. For a future optional
 semantic backend, first evaluate an on-demand OmniParser detector against a
 measured local RAM/latency budget; keep the present UIA/OCR resolver as the
 default. See `scripts/phase8a2_smoke.py` and `scripts/phase8a2_live_acceptance.py`.
+
+## Safe grounded actions (Phase 8A.3)
+
+Capture -> UIA/OCR -> fusion -> `GroundedTarget` -> `TargetActionValidator` ->
+ToolRegistry `ApprovalPolicy` -> existing COMPUTER input backend -> fresh
+observation -> deterministic verification. `computer.click_target`,
+`computer.double_click_target`, `computer.focus_target`, and
+`computer.type_into_target` accept resolver-issued target IDs or a target
+label; they do not expose model-facing raw coordinates. Targets older than
+three seconds are rejected unless the original exact label is supplied for
+one bounded fresh resolution; ambiguous labels, changed windows,
+hidden/disabled controls, invalid boxes, and points outside the expected
+window are rejected. Semantic
+button labels can raise risk; CONSEQUENTIAL and DESTRUCTIVE actions wait for
+explicit approval. Actions are never retried automatically after input, and
+uncertain outcomes return `ACTION_EXECUTED_UNVERIFIED`. Grounding and actions
+remain local-only; screenshots are not persisted, and observations do not
+write memory or the Obsidian vault. See `scripts/phase8a3_smoke.py` and the
+owned-window acceptance fixture in `tests/scripts/phase8a2_owned_window_acceptance.py`.

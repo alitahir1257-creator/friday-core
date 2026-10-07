@@ -34,6 +34,7 @@ from friday.connectors.local_files import ApprovedRoot, LocalFilesConnector
 from friday.documents import DocumentManager
 from friday.tools.adapters import register_computer_tools, register_knowledge_tools
 from friday.tools.vision import register_vision_tools
+from friday.tools.computer_actions import register_grounded_computer_tools
 from friday.tools.documents import register_document_tools
 from friday.tools.research import register_research_tools
 from friday.apis.registry import build_default_api_registry
@@ -71,6 +72,9 @@ class FridayCore:
         self.tool_registry = ToolRegistry()
         register_computer_tools(self.tool_registry, self._computer_controller)
         register_vision_tools(self.tool_registry, self._vision_manager)
+        register_grounded_computer_tools(
+            self.tool_registry, self._vision_manager, self._computer_controller,
+        )
         register_knowledge_tools(self.tool_registry, getattr(self._brain_manager, "unified", None))
         configured_roots = getattr(profile, "document_roots", (r"D:\FRIDAY\documents",))
         public_roots = getattr(profile, "public_document_roots", ())
@@ -399,6 +403,19 @@ class FridayCore:
         return self._vision
 
     def _computer_tool(self, command: str) -> tuple[str, dict]:
+        action = re.fullmatch(
+            r"(?:please\s+)?(?:(double\s+click|click|focus)(?:\s+on)?)\s+(.+)",
+            command.strip().rstrip(".?!"), re.IGNORECASE,
+        )
+        if action:
+            operation, query = action.group(1).casefold(), action.group(2).strip()
+            if query:
+                tool = {
+                    "double click": "computer.double_click_target",
+                    "click": "computer.click_target",
+                    "focus": "computer.focus_target",
+                }[operation]
+                return tool, {"query": query}
         plan = self._deterministic_computer_plan(command)
         if plan is not None and len(plan.actions) == 1:
             action = plan.actions[0]

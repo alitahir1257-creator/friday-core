@@ -142,6 +142,22 @@ def candidates_from_observation(observation: ScreenObservation,
                     metadata={**item.metadata, "provenance": ["UIA", "OCR"],
                               "ocr_label": label, "ocr_bbox": box, "ocr_confidence": block.confidence})
             continue
+        editable_matches = [
+            element for element in observation.uia_elements
+            if element.visible and element.enabled is not False and element.bbox is not None
+            and element.kind.casefold() in {"edit", "combobox", "document"}
+            and box_within(element.bbox, bounds) and _same_place(element.bbox, box)
+        ]
+        if len(editable_matches) == 1:
+            element = editable_matches[0]
+            results.append(_target(
+                label, box, "FUSED", block.confidence, observation,
+                enabled=element.enabled, control_type=element.kind,
+                metadata={"provenance": ["OCR", "UIA"], "ocr_label": label,
+                          "ocr_bbox": box, "ocr_confidence": block.confidence,
+                          "automation_id": element.identifier, "control_bbox": element.bbox},
+            ))
+            continue
         results.append(_target(label, box, "OCR", block.confidence, observation,
                                metadata={"provenance": ["OCR"]}))
     return tuple(results)
