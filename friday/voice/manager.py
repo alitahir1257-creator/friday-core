@@ -19,14 +19,18 @@ from friday.voice.models import (
     DeviceCatalog,
     TranscriptResult,
     VoiceConfig,
+    SPEAKING_SPEED_SCALES,
+    VOICE_PROFILES,
     VoiceEvent,
     VoiceMode,
     VoiceState,
     VoiceStatus,
 )
+from friday.voice.language import detect_language, normalize_for_brain
+from friday.voice.router import TTSRouter
 from friday.voice.session import SessionState, is_end_phrase, is_tts_echo, strip_wake_prefix
-from friday.voice.stt import SherpaOnnxSTT
-from friday.voice.tts import PiperLocalTTS
+from friday.voice.style import SpeechStyle, SpeechStyleEngine
+from friday.voice.stt import create_local_stt
 from friday.voice.vad import EnergyVAD
 from friday.voice.wake import SherpaWakeWord
 
@@ -51,12 +55,23 @@ class VoiceManager:
         event_listener: Callable[[VoiceEvent], None] | None = None,
     ) -> None:
         self.core = core
-        self.config = config or VoiceConfig()
+        profile = getattr(core, "profile", None)
+        self.config = config or (VoiceConfig(
+            assistant_name=profile.assistant_name,
+            wake_phrase=profile.wake_name,
+            tts_model_path=VOICE_PROFILES[profile.voice_profile].model_path,
+            tts_length_scale=SPEAKING_SPEED_SCALES[profile.speaking_speed],
+            stt_language_hint="en" if profile.language == "english" else "auto",
+            voice_engine=profile.voice_engine,
+            voice_quality=profile.voice_quality,
+            emotion_mode=profile.emotion_mode,
+        ) if profile is not None else VoiceConfig())
         self.audio_input = audio_input or AudioInput(
             device=self.config.input_device, frame_ms=self.config.frame_ms,
         )
-        self.stt = stt or SherpaOnnxSTT(self.config)
-        self.tts = tts or PiperLocalTTS(self.config)
+        self.stt = stt or create_local_stt(self.config)
+        self.tts = tts or TTSRouter(self.config)
+        self._style_engine = SpeechStyleEngine()
         self.wake_detector = wake_detector or SherpaWakeWord(self.config)
         self._device_discovery = device_discovery or discover_devices
         self._session = SessionState()
@@ -318,10 +333,16 @@ class VoiceManager:
         if message in {
             "SOUNDDEVICE_INSTALL_REQUIRED", "MICROPHONE_UNAVAILABLE", "SPEAKER_UNAVAILABLE",
             "STT_MODEL_MISSING", "STT_INSTALL_REQUIRED", "TTS_MODEL_MISSING",
+            "WHISPER_CPP_EXECUTABLE_MISSING", "WHISPER_CPP_MODEL_MISSING", "WHISPER_CPP_TIMEOUT",
+            "WHISPER_CPP_TEMP_AUDIO_CLEANUP_FAILED",
             "TTS_INSTALL_REQUIRED", "WAKE_MODEL_MISSING", "SENTENCEPIECE_INSTALL_REQUIRED",
             "WAKE_TOKENIZER_MISSING", "WAKE_PHRASE_INVALID", "WAKE_PHRASE_UNSUPPORTED_BY_MODEL",
         }:
             return message
+        if message.startswith("WHISPER_CPP_EXECUTION_FAILED:"):
+            return "WHISPER_CPP_EXECUTION_FAILED"
+        if message.startswith("WHISPER_CPP_EXIT_"):
+            return "WHISPER_CPP_INFERENCE_FAILED"
         return type(error).__name__.upper()
 
     def _start_audio(self, catalog: DeviceCatalog) -> None:
@@ -526,6 +547,10 @@ class VoiceManager:
         if self._strip_wake_once:
             text = strip_wake_prefix(text, self.config.wake_phrase)
             self._strip_wake_once = False
+        normalized = normalize_for_brain(
+            text, preferred_language=getattr(getattr(self.core, "profile", None), "language", "auto"),
+        )
+        text = normalized.display_text
         self._emit(
             "transcript_final", text=text, confidence=transcript.confidence,
             language=transcript.language, engine=transcript.engine,
@@ -552,7 +577,7 @@ class VoiceManager:
         session.touch()
         brain_started = time.perf_counter()
         request_metadata = self._request_metadata(session.privacy)
-        kwargs = {"on_status": self._on_core_status}
+        kwargs = {"on_status": self._on_core_status, "voice_response": True}
         if request_metadata is not None:
             kwargs["request_metadata"] = request_metadata
         if self._session_history is not None:
@@ -580,7 +605,7 @@ class VoiceManager:
         if self._session_history is not None:
             self._session_history.add_exchange(text, answer)
         self._release_owned_local_brain()
-        self._speak_answer(answer)
+        self._speak_answer(answer, user_text=text)
 
     @staticmethod
     def _request_metadata(privacy: str):
@@ -593,20 +618,35 @@ class VoiceManager:
             sensitivity="private", privacy=privacy, task_class=ModelPolicy.PRIVATE.value,
         )
 
-    def _speak_answer(self, answer: str) -> None:
+    def _speak_answer(self, answer: str, *, user_text: str = "") -> None:
         text = " ".join(str(answer).split())
         if not text:
             self._resume_listening()
             return
         if len(text) > self.config.max_tts_chars:
             text = text[: self.config.max_tts_chars].rsplit(" ", 1)[0].rstrip(" ,;:")
-        self._current_tts_text = text
+        language = detect_language(text)
+        request = self._style_engine.request(
+            text, language=language,
+            voice_profile=getattr(getattr(self.core, "profile", None), "voice_profile", "lessac"),
+            quality_preference=self.config.voice_quality,
+            user_text=user_text,
+            override=SpeechStyle.NEUTRAL if self.config.emotion_mode == "neutral" else None,
+        )
+        self._current_tts_text = request.speech_text
         self._current_tts_started = time.monotonic()
         self._interrupt_event.clear()
         self._session.transition(VoiceState.SPEAKING)
-        self._emit("speaking_started", engine=getattr(self.tts, "engine", "local"))
+        self._emit(
+            "speaking_started", engine=getattr(self.tts, "engine", "local"),
+            style=request.style.value, language=request.language.value,
+        )
         try:
-            self.tts.speak(text)
+            render = getattr(self.tts, "speak_render", None)
+            if callable(render):
+                render(request)
+            else:
+                self.tts.speak(request.speech_text)
         except Exception as error:
             self._emit("voice_error", code=self._error_code(error), phase="tts_start")
             self._resume_listening()
@@ -624,7 +664,7 @@ class VoiceManager:
             self._emit("voice_error", code=str(self.tts.last_error), phase="tts")
         interrupted = self._interrupt_event.is_set()
         if not interrupted:
-            self._last_tts_text = text
+            self._last_tts_text = request.speech_text
             self._last_tts_finished = time.monotonic()
             self._release_voice_engines()
             self._vad = self._new_vad()

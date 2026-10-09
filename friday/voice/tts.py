@@ -13,6 +13,7 @@ import numpy as np
 
 from friday.voice.audio import AudioOutput
 from friday.voice.models import DEFAULT_TTS_MODEL, VoiceConfig
+from friday.voice.style import SpeechRenderRequest
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,8 @@ class PiperLocalTTS:
         self._playing = False
         self.last_error: str | None = None
         self.last_first_audio_latency_ms: float | None = None
+        self.last_render: SpeechRenderRequest | None = None
+        self.last_length_scale: float = float(self.config.tts_length_scale)
 
     @property
     def available(self) -> bool:
@@ -93,7 +96,10 @@ class PiperLocalTTS:
             raise RuntimeError("TTS_INSTALL_REQUIRED") from error
         self._voice = PiperVoice.load(str(self.model_path))
 
-    def synthesize(self, text: str, *, cancel_event: threading.Event | None = None) -> SynthesizedAudio:
+    def synthesize(
+        self, text: str, *, cancel_event: threading.Event | None = None,
+        length_scale: float | None = None, sentence_silence: float = 0.0,
+    ) -> SynthesizedAudio:
         clean_text = " ".join(str(text).split())
         if not clean_text:
             return SynthesizedAudio(np.empty(0, dtype=np.int16), 22_050)
@@ -105,9 +111,21 @@ class PiperLocalTTS:
         sample_rate = int(getattr(getattr(self._voice, "config", None), "sample_rate", 22_050))
         chunks: list[np.ndarray] = []
         sample_count = 0
-        for chunk in self._voice.synthesize(clean_text):
+        effective_length_scale = float(self.config.tts_length_scale if length_scale is None else length_scale)
+        from piper import SynthesisConfig
+        chunks_iter = self._voice.synthesize(
+            clean_text,
+            syn_config=SynthesisConfig(
+                length_scale=effective_length_scale, normalize_audio=True, volume=0.85,
+            ),
+        )
+        silence_samples = round(sample_rate * min(0.15, max(0.0, float(sentence_silence))))
+        for chunk in chunks_iter:
             if cancel_event is not None and cancel_event.is_set():
                 break
+            if chunks and silence_samples:
+                sample_count += silence_samples
+                chunks.append(np.zeros(silence_samples, dtype=np.int16))
             pcm = np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16).copy()
             sample_count += pcm.size
             if sample_count > self.config.max_tts_seconds * sample_rate:
@@ -117,6 +135,27 @@ class PiperLocalTTS:
         return SynthesizedAudio(audio, sample_rate)
 
     def speak(self, text: str) -> None:
+        self._start_speaking(
+            text, length_scale=float(self.config.tts_length_scale), sentence_silence=0.0, request=None,
+        )
+
+    def speak_render(self, request: SpeechRenderRequest) -> None:
+        """Render a bounded presentation style through Piper prosody controls.
+
+        Piper has no learned emotion control.  This deliberately changes only
+        safe timing/prosody and records the render contract for validation.
+        """
+        self._start_speaking(
+            request.speech_text,
+            length_scale=_piper_length_scale(request.pace, self.config.tts_length_scale),
+            sentence_silence=request.sentence_silence,
+            request=request,
+        )
+
+    def _start_speaking(
+        self, text: str, *, length_scale: float, sentence_silence: float,
+        request: SpeechRenderRequest | None,
+    ) -> None:
         clean_text = " ".join(str(text).split())
         if not clean_text:
             return
@@ -127,16 +166,25 @@ class PiperLocalTTS:
             self._playing = True
             self.last_error = None
             self.last_first_audio_latency_ms = None
+            self.last_render = request
+            self.last_length_scale = length_scale
             self._worker = threading.Thread(
-                target=self._speak_worker, args=(clean_text, self._cancel),
+                target=self._speak_worker,
+                args=(clean_text, self._cancel, length_scale, sentence_silence),
                 name="friday-local-tts", daemon=True,
             )
             self._worker.start()
 
-    def _speak_worker(self, text: str, cancel_event: threading.Event) -> None:
+    def _speak_worker(
+        self, text: str, cancel_event: threading.Event, length_scale: float,
+        sentence_silence: float,
+    ) -> None:
         started = time.perf_counter()
         try:
-            audio = self.synthesize(text, cancel_event=cancel_event)
+            audio = self.synthesize(
+                text, cancel_event=cancel_event, length_scale=length_scale,
+                sentence_silence=sentence_silence,
+            )
             if audio.samples.size and not cancel_event.is_set():
                 def on_started() -> None:
                     self.last_first_audio_latency_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -165,4 +213,10 @@ class PiperLocalTTS:
         gc.collect()
 
 
-__all__ = ["LocalTTS", "PiperLocalTTS", "SynthesizedAudio", "installed_voices"]
+def _piper_length_scale(pace: float, configured_scale: float) -> float:
+    """Convert bounded speech pace to Piper's inverse length-scale control."""
+    normalized_pace = min(1.12, max(0.88, float(pace)))
+    return round(min(1.4, max(0.7, float(configured_scale) / normalized_pace)), 3)
+
+
+__all__ = ["LocalTTS", "PiperLocalTTS", "SynthesizedAudio", "_piper_length_scale", "installed_voices"]
