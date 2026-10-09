@@ -12,6 +12,7 @@ from typing import Protocol
 import numpy as np
 
 from friday.voice.audio import AudioOutput
+from friday.voice.emotion import PIPER_CAPABILITIES
 from friday.voice.models import DEFAULT_TTS_MODEL, VoiceConfig
 from friday.voice.style import SpeechRenderRequest
 
@@ -48,6 +49,7 @@ def installed_voices(voice_dir: Path) -> tuple[str, ...]:
 
 class PiperLocalTTS:
     engine = "piper"
+    capabilities = PIPER_CAPABILITIES
 
     def __init__(
         self,
