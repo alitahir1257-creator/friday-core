@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict
+from decimal import Decimal, localcontext
+from pathlib import Path
+import re
+import shutil
 from typing import Any
 
 from friday.capabilities.computer.controller import ComputerController
@@ -47,6 +51,106 @@ def register_computer_tools(
         ),
         capabilities=frozenset({"computer"}), risk_level=RiskLevel.REVERSIBLE,
         privacy_support=_PRIVACY, source="native", side_effects="local_desktop",
+    ))
+
+    def disk_free_space(_args: dict[str, Any], _context: ToolInvocationContext) -> str:
+        free_bytes = shutil.disk_usage("C:\\").free
+        return f"C: {free_bytes} bytes free ({free_bytes / (1024 ** 3):.2f} GiB)."
+
+    registry.register(ToolDefinition(
+        name="disk_free_space", namespace="computer",
+        description="Read the current free space on the C drive.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=disk_free_space, capabilities=frozenset({"computer", "filesystem"}),
+        risk_level=RiskLevel.READ_ONLY, privacy_support=_PRIVACY,
+        source="native", side_effects="local_read",
+    ))
+
+    def find_project_readme(_args: dict[str, Any], _context: ToolInvocationContext) -> str:
+        project_root = Path(__file__).resolve().parents[2]
+        matches = []
+        for path in project_root.glob("README*"):
+            try:
+                resolved = path.resolve(strict=True)
+                if resolved.parent == project_root and resolved.is_file():
+                    matches.append(str(resolved))
+            except OSError:
+                continue
+        matches.sort()
+        return "\n".join(matches[:10]) if matches else f"No README file was found in {project_root}."
+
+    registry.register(ToolDefinition(
+        name="find_project_readme", namespace="computer",
+        description="Find README files in the FRIDAY project root.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=find_project_readme, capabilities=frozenset({"computer", "filesystem"}),
+        risk_level=RiskLevel.READ_ONLY, privacy_support=_PRIVACY,
+        source="native", side_effects="local_read",
+    ))
+
+    def latest_download(_args: dict[str, Any], _context: ToolInvocationContext) -> str:
+        downloads = Path.home() / "Downloads"
+        try:
+            root = downloads.resolve(strict=True)
+        except OSError:
+            return f"Downloads folder is unavailable: {downloads}."
+        if not root.is_dir():
+            return f"Downloads folder is unavailable: {root}."
+        # shortcut: direct files only; recurse if nested Downloads folders must count.
+        files = []
+        for path in root.iterdir():
+            try:
+                resolved = path.resolve(strict=True)
+                if resolved.parent == root and resolved.is_file():
+                    files.append((resolved.stat().st_mtime, resolved))
+            except (OSError, RuntimeError):
+                continue
+        if not files:
+            return f"No files were found in {root}."
+        _modified, newest = max(files, key=lambda item: (item[0], item[1].name.casefold()))
+        return f"Latest file in Downloads by modified time: {newest.resolve()}."
+
+    registry.register(ToolDefinition(
+        name="latest_download", namespace="computer",
+        description="Find the most recently modified file in the current user's Downloads folder.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=latest_download, capabilities=frozenset({"computer", "filesystem"}),
+        risk_level=RiskLevel.READ_ONLY, privacy_support=_PRIVACY,
+        source="native", side_effects="local_read",
+    ))
+
+    def calculate(args: dict[str, Any], _context: ToolInvocationContext) -> str:
+        number = re.compile(r"\d{1,16}(?:\.\d{1,16})?\Z")
+        left_text, right_text, operator = args["left"], args["right"], args["operator"]
+        if not number.fullmatch(left_text) or not number.fullmatch(right_text):
+            raise ValueError("Calculator inputs must be bounded decimal numbers.")
+        left, right = Decimal(left_text), Decimal(right_text)
+        if operator == "divide" and right == 0:
+            raise ValueError("Division by zero is undefined.")
+        with localcontext() as context:
+            context.prec = 80
+            value = {
+                "plus": lambda: left + right,
+                "minus": lambda: left - right,
+                "multiply": lambda: left * right,
+                "divide": lambda: left / right,
+            }[operator]()
+        rendered = format(value, "f")
+        if "." in rendered:
+            rendered = rendered.rstrip("0").rstrip(".")
+        return f"{left_text} {operator} {right_text} = {rendered}"
+
+    registry.register(ToolDefinition(
+        name="calculate", namespace="computer",
+        description="Calculate one bounded decimal arithmetic operation locally.",
+        input_schema={"type": "object", "properties": {
+            "left": {"type": "string", "minLength": 1, "maxLength": 33},
+            "operator": {"type": "string", "enum": ["plus", "minus", "multiply", "divide"]},
+            "right": {"type": "string", "minLength": 1, "maxLength": 33},
+        }, "required": ["left", "operator", "right"], "additionalProperties": False},
+        handler=calculate, capabilities=frozenset({"computer", "calculator"}),
+        risk_level=RiskLevel.READ_ONLY, privacy_support=_PRIVACY,
+        source="native", side_effects="none",
     ))
 
     registry.register(ToolDefinition(

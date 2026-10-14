@@ -30,7 +30,7 @@ from friday.voice.language import detect_language, normalize_for_brain
 from friday.voice.router import TTSRouter
 from friday.voice.session import SessionState, is_end_phrase, is_tts_echo, strip_wake_prefix
 from friday.voice.style import SpeechStyle, SpeechStyleEngine
-from friday.voice.stt import create_local_stt
+from friday.voice.stt import STTUnavailableError, create_local_stt
 from friday.voice.vad import EnergyVAD
 from friday.voice.wake import SherpaWakeWord
 
@@ -85,6 +85,7 @@ class VoiceManager:
         self._turn_thread: threading.Thread | None = None
         self._closed = False
         self._audio_started = False
+        self._audio_release_error: str | None = None
         self._wake_armed = False
         self._wake_privacy = "public"
         self._ptt_active = False
@@ -112,6 +113,10 @@ class VoiceManager:
     @property
     def state(self) -> VoiceState:
         return self._session.state
+
+    @property
+    def microphone_active(self) -> bool:
+        return bool(self._audio_started and getattr(self.audio_input, "active", False))
 
     @property
     def session(self) -> ConversationSession | None:
@@ -181,16 +186,27 @@ class VoiceManager:
         privacy = self._validate_privacy(privacy)
         with self._lock:
             if self.state == VoiceState.SPEAKING:
+                session = self.session
+                if session is not None:
+                    session.mode = VoiceMode.PTT
                 self.tts.stop()
                 self._interrupt_event.set()
                 self._session.transition(VoiceState.INTERRUPTED)
                 self._emit("barge_in", source="push_to_talk")
-                if self.session is not None:
-                    self.session.mode = VoiceMode.PTT
                 self._ptt_active = True
                 self._ptt_segments.clear()
                 self._ptt_sample_count = 0
                 self._vad = self._new_vad(threshold=self.config.barge_in_rms)
+                if not self.microphone_active:
+                    try:
+                        catalog = self.device_catalog()
+                        if self._audio_started:
+                            self._stop_audio()
+                        self._start_audio(catalog)
+                    except Exception as error:
+                        self._ptt_active = False
+                        self._end_session("ptt_reacquisition_failed")
+                        return self._unavailable(self._error_code(error), phase="ptt")
                 self._session.transition(VoiceState.LISTENING)
                 return VoiceState.LISTENING.value
             if self.session is not None:
@@ -304,6 +320,8 @@ class VoiceManager:
             return VoiceState.LISTENING.value
 
     def _availability_code(self, catalog: DeviceCatalog, *, require_wake: bool) -> str | None:
+        if not bool(getattr(self.stt, "available", False)):
+            return "STT_UNAVAILABLE" if getattr(self.stt, "engine", "") == "gemini" else "VOICE_UNAVAILABLE"
         selected_input = next(
             (item for item in catalog.inputs if item.index == self.config.input_device),
             catalog.default_input if self.config.input_device is None else None,
@@ -324,14 +342,18 @@ class VoiceManager:
 
     def _unavailable(self, code: str, *, phase: str) -> str:
         self._last_error_code = code
+        self._session.transition(VoiceState.ERROR)
         self._emit("voice_error", code=code, phase=phase)
-        return "VOICE_UNAVAILABLE"
+        return "STT_UNAVAILABLE" if code == "STT_UNAVAILABLE" else "VOICE_UNAVAILABLE"
 
     @staticmethod
     def _error_code(error: Exception) -> str:
+        if isinstance(error, STTUnavailableError):
+            return "STT_UNAVAILABLE"
         message = str(error)
         if message in {
             "SOUNDDEVICE_INSTALL_REQUIRED", "MICROPHONE_UNAVAILABLE", "SPEAKER_UNAVAILABLE",
+            "AUDIO_OUTPUT_TIMEOUT", "AUDIO_OUTPUT_CLEANUP_FAILED",
             "STT_MODEL_MISSING", "STT_INSTALL_REQUIRED", "TTS_MODEL_MISSING",
             "WHISPER_CPP_EXECUTABLE_MISSING", "WHISPER_CPP_MODEL_MISSING", "WHISPER_CPP_TIMEOUT",
             "WHISPER_CPP_TEMP_AUDIO_CLEANUP_FAILED",
@@ -350,6 +372,7 @@ class VoiceManager:
             self._ensure_workers()
             self.audio_input.start(self._queue_audio)
             self._audio_started = True
+            self._audio_release_error = None
         self._mic_device = getattr(self.audio_input, "device_name", None)
         if self._mic_device is None and catalog.default_input is not None:
             self._mic_device = catalog.default_input.name
@@ -358,6 +381,8 @@ class VoiceManager:
         if self._audio_started:
             try:
                 self.audio_input.stop()
+            except Exception as error:
+                self._audio_release_error = self._error_code(error)
             finally:
                 self._audio_started = False
 
@@ -500,20 +525,21 @@ class VoiceManager:
         if result.speech_ended and result.utterance is not None:
             self._queue_turn(result.utterance)
 
-    def _queue_turn(self, samples: np.ndarray) -> None:
+    def _queue_turn(self, samples: np.ndarray, end_detection_ms: float = 0.0) -> None:
         session = self.session
         if session is None or samples is None or len(samples) == 0:
             return
         session.touch()
         self._session.transition(VoiceState.PROCESSING)
-        self._emit("processing_started", audio_duration_ms=round(len(samples) * 1000 / self.config.sample_rate, 2))
-        item = (np.asarray(samples, dtype=np.float32).copy(), time.monotonic())
+        item = (
+            np.asarray(samples, dtype=np.float32).copy(), time.monotonic(),
+            max(0.0, float(end_detection_ms)),
+        )
         try:
             self._turn_queue.put_nowait(item)
         except queue.Full:
             self._emit("voice_error", code="TURN_QUEUE_FULL", phase="process")
-            self._session.transition(VoiceState.LISTENING)
-            self._listen_deadline = time.monotonic() + self.config.continuous_timeout_seconds
+            self._finish_voice_turn()
 
     def _turn_loop(self) -> None:
         while not self._closed:
@@ -523,22 +549,47 @@ class VoiceManager:
                 continue
             if item is END_OF_QUEUE:
                 return
-            samples, speech_end_mark = item
+            samples, speech_end_mark, end_detection_ms = item
             try:
-                self._process_utterance(samples, speech_end_mark)
+                self._process_utterance(samples, speech_end_mark, end_detection_ms)
             except Exception as error:
                 self._emit("voice_error", code=self._error_code(error), phase="turn")
-                if self.session is not None:
-                    self._session.transition(VoiceState.LISTENING)
-                    self._listen_deadline = time.monotonic() + self.config.continuous_timeout_seconds
+                self._finish_voice_turn()
 
-    def _process_utterance(self, samples: np.ndarray, speech_end_mark: float) -> None:
+    def _process_utterance(
+        self, samples: np.ndarray, speech_end_mark: float, end_detection_ms: float = 0.0,
+    ) -> None:
         session = self.session
         if session is None:
             return
+        self._session.transition(VoiceState.TRANSCRIBING)
+        capture_duration_ms = round(len(samples) * 1000 / self.config.sample_rate, 2)
+        self._emit("transcribing_started", audio_duration_ms=capture_duration_ms)
         stt_started = time.perf_counter()
         try:
+            if session.privacy in PRIVATE_LEVELS and bool(getattr(self.stt, "is_cloud", False)):
+                raise STTUnavailableError("STT_PRIVATE_MODE")
             transcript = self.stt.transcribe(samples, self.config.sample_rate)
+        except STTUnavailableError as error:
+            self._last_error_code = "STT_UNAVAILABLE"
+            self._last_latency = {
+                "capture_duration_ms": capture_duration_ms,
+                "speech_end_detection_ms": round(max(0.0, end_detection_ms), 2),
+                "gemini_upload_ms": 0.0,
+                "gemini_request_ms": 0.0,
+                "transcription_latency_ms": round((time.perf_counter() - stt_started) * 1000, 2),
+            }
+            self._emit(
+                "voice_error", code="STT_UNAVAILABLE", reason=error.reason_code,
+                phase="transcribing",
+            )
+            message = (
+                "Speech recognition is unavailable in private mode."
+                if error.reason_code == "STT_PRIVATE_MODE"
+                else "Speech recognition is unavailable right now."
+            )
+            self._speak_answer(message)
+            return
         finally:
             # Release STT before BrainManager can load local Qwen on an 8 GB host.
             self.stt.close()
@@ -551,13 +602,14 @@ class VoiceManager:
             text, preferred_language=getattr(getattr(self.core, "profile", None), "language", "auto"),
         )
         text = normalized.display_text
+        self._session.transition(VoiceState.PROCESSING)
         self._emit(
             "transcript_final", text=text, confidence=transcript.confidence,
             language=transcript.language, engine=transcript.engine,
             duration_ms=transcript.duration_ms, audio_duration_ms=transcript.audio_duration_ms,
         )
         if not text:
-            self._resume_listening()
+            self._finish_voice_turn()
             return
         if is_end_phrase(text, self.config.assistant_name):
             self._end_session("end_phrase")
@@ -566,7 +618,7 @@ class VoiceManager:
             time.monotonic() - self._last_tts_finished <= 8.0
             and is_tts_echo(text, self._last_tts_text)
         ):
-            self._resume_listening()
+            self._finish_voice_turn()
             return
 
         session = self.session
@@ -591,10 +643,22 @@ class VoiceManager:
         self._last_barge_in_stop_ms = None
         self._last_latency = {
             "wake_detection_ms": float(getattr(self.wake_detector, "last_detection_ms", 0.0) or 0.0),
-            "speech_end_detection_ms": round(max(0.0, (time.monotonic() - speech_end_mark) * 1000), 2),
+            "capture_duration_ms": capture_duration_ms,
+            "speech_end_detection_ms": round(max(0.0, end_detection_ms), 2),
             "stt_ms": stt_ms,
+            "gemini_upload_ms": float(transcript.latency_ms.get("gemini_upload_ms", 0.0)),
+            "gemini_request_ms": float(transcript.latency_ms.get("gemini_request_ms", 0.0)),
+            "transcription_latency_ms": float(transcript.duration_ms),
             "brain_orchestration_ms": round(max(0.0, response_ms - model_ms), 2),
             "brain_model_ms": round(model_ms, 2),
+            "router_latency_ms": float(getattr(self.core, "last_route_telemetry", {}).get("router_ms", 0.0)),
+            "openjev_latency_ms": float(getattr(self.core, "last_route_telemetry", {}).get("openjev_ms", 0.0)),
+            "tool_registry_latency_ms": float(
+                getattr(getattr(self.core, "last_tool_result", None), "duration_ms", 0.0) or 0.0
+            ),
+            "utterance_end_to_tts_start_ms": round(
+                max(0.0, (time.monotonic() - speech_end_mark) * 1000), 2,
+            ),
             "total_local_overhead_ms": round(
                 stt_ms + max(0.0, response_ms - model_ms)
                 + barge_stop_ms, 2,
@@ -636,46 +700,82 @@ class VoiceManager:
         self._current_tts_text = request.speech_text
         self._current_tts_started = time.monotonic()
         self._interrupt_event.clear()
+        speaking_started = time.perf_counter()
         self._session.transition(VoiceState.SPEAKING)
         self._emit(
             "speaking_started", engine=getattr(self.tts, "engine", "local"),
             style=request.style.value, language=request.language.value,
         )
+        speech_error: Exception | None = None
         try:
             render = getattr(self.tts, "speak_render", None)
             if callable(render):
                 render(request)
             else:
                 self.tts.speak(request.speech_text)
+            self._vad = self._new_vad(threshold=self.config.barge_in_rms)
+            while self.tts.is_speaking and not self._closed and not self._interrupt_event.wait(0.02):
+                pass
         except Exception as error:
-            self._emit("voice_error", code=self._error_code(error), phase="tts_start")
-            self._resume_listening()
-            return
-        self._vad = self._new_vad(threshold=self.config.barge_in_rms)
-        while self.tts.is_speaking and not self._closed and not self._interrupt_event.wait(0.02):
-            pass
-        first_audio_ms = getattr(self.tts, "last_first_audio_latency_ms", None)
-        if first_audio_ms is not None:
-            self._last_latency["tts_first_audio_ms"] = float(first_audio_ms)
-            self._last_latency["total_local_overhead_ms"] = round(
-                self._last_latency.get("total_local_overhead_ms", 0.0) + float(first_audio_ms), 2
+            speech_error = error
+        finally:
+            first_audio_ms = getattr(self.tts, "last_first_audio_latency_ms", None)
+            metrics = {
+                "tts_generation_ms": getattr(self.tts, "last_generation_duration_ms", None),
+                "tts_audio_callback_ms": getattr(self.tts, "last_audio_callback_span_ms", None),
+                "tts_playback_ms": getattr(self.tts, "last_playback_duration_ms", None),
+                "tts_output_drain_ms": getattr(self.tts, "last_output_drain_ms", None),
+                "tts_output_close_ms": getattr(self.tts, "last_output_close_ms", None),
+                "tts_first_audio_ms": first_audio_ms,
+            }
+            speaking_state_ms = round((time.perf_counter() - speaking_started) * 1000, 2)
+            metrics["speaking_state_ms"] = speaking_state_ms
+            for key, value in metrics.items():
+                if value is not None:
+                    self._last_latency[key] = float(value)
+            if first_audio_ms is not None:
+                if "utterance_end_to_tts_start_ms" in self._last_latency:
+                    self._last_latency["utterance_end_to_first_audible_ms"] = round(
+                        self._last_latency["utterance_end_to_tts_start_ms"] + float(first_audio_ms), 2,
+                    )
+                self._last_latency["total_local_overhead_ms"] = round(
+                    self._last_latency.get("total_local_overhead_ms", 0.0) + float(first_audio_ms), 2,
+                )
+            tts_error = getattr(self.tts, "last_error", None)
+            if speech_error is not None:
+                self._last_error_code = self._error_code(speech_error)
+            elif tts_error:
+                self._last_error_code = str(tts_error)
+            interrupted = self._interrupt_event.is_set()
+            if not interrupted:
+                self._last_tts_text = request.speech_text
+                self._last_tts_finished = time.monotonic()
+                if self.session is not None:
+                    self._session.transition(VoiceState.ENDING)
+            else:
+                self._last_tts_text = text
+                self._last_tts_finished = time.monotonic()
+            self._emit(
+                "speaking_stopped",
+                reason="barge_in" if interrupted else "failed" if speech_error or tts_error else "complete",
+                **metrics,
             )
-        if getattr(self.tts, "last_error", None):
-            self._emit("voice_error", code=str(self.tts.last_error), phase="tts")
-        interrupted = self._interrupt_event.is_set()
-        if not interrupted:
-            self._last_tts_text = request.speech_text
-            self._last_tts_finished = time.monotonic()
-            self._release_voice_engines()
-            self._vad = self._new_vad()
-            self._emit("speaking_stopped", reason="complete")
-            self._resume_listening()
-        elif self.session is not None:
-            self._last_tts_text = text
-            self._last_tts_finished = time.monotonic()
-            self._release_voice_engines()
-            # Keep the barge-in VAD state so it can finish the user's utterance.
-            self._resume_listening(reset_deadline=False, post_tts_cooldown=False)
+            if speech_error is not None:
+                self._emit("voice_error", code=self._last_error_code or "TTS_FAILED", phase="tts")
+            elif tts_error:
+                self._emit("voice_error", code=str(tts_error), phase="tts")
+            try:
+                self._release_voice_engines()
+            finally:
+                if interrupted and self.session is not None:
+                    if self.session.mode == VoiceMode.PTT and not self._ptt_active:
+                        self._finish_voice_turn()
+                    else:
+                        # Keep the barge-in VAD state so it can finish the user's utterance.
+                        self._resume_listening(reset_deadline=False, post_tts_cooldown=False)
+                elif self.session is not None:
+                    self._vad = self._new_vad()
+                    self._finish_voice_turn()
     def _resume_listening(
         self, *, reset_deadline: bool = True, post_tts_cooldown: bool = True,
     ) -> None:
@@ -692,8 +792,15 @@ class VoiceManager:
             time.monotonic() + self.config.continuous_timeout_seconds if reset_deadline else None
         )
         self._emit("listening_started", mode=session.mode.value)
+
+    def _finish_voice_turn(self) -> None:
+        session = self.session
+        if session is None:
+            return
         if session.mode == VoiceMode.PTT:
             self._end_session("ptt_turn_complete")
+        else:
+            self._resume_listening()
 
     def _check_timeout(self) -> None:
         if self._listen_deadline is None or time.monotonic() < self._listen_deadline:

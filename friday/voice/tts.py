@@ -67,6 +67,11 @@ class PiperLocalTTS:
         self._playing = False
         self.last_error: str | None = None
         self.last_first_audio_latency_ms: float | None = None
+        self.last_generation_duration_ms: float | None = None
+        self.last_audio_callback_span_ms: float | None = None
+        self.last_playback_duration_ms: float | None = None
+        self.last_output_drain_ms: float | None = None
+        self.last_output_close_ms: float | None = None
         self.last_render: SpeechRenderRequest | None = None
         self.last_length_scale: float = float(self.config.tts_length_scale)
 
@@ -168,6 +173,17 @@ class PiperLocalTTS:
             self._playing = True
             self.last_error = None
             self.last_first_audio_latency_ms = None
+            self.last_generation_duration_ms = None
+            self.last_audio_callback_span_ms = None
+            self.last_playback_duration_ms = None
+            self.last_output_drain_ms = None
+            self.last_output_close_ms = None
+            for name in (
+                "last_audio_callback_span_ms", "last_playback_duration_ms",
+                "last_output_drain_ms", "last_output_close_ms",
+            ):
+                if hasattr(self.output, name):
+                    setattr(self.output, name, None)
             self.last_render = request
             self.last_length_scale = length_scale
             self._worker = threading.Thread(
@@ -175,7 +191,12 @@ class PiperLocalTTS:
                 args=(clean_text, self._cancel, length_scale, sentence_silence),
                 name="friday-local-tts", daemon=True,
             )
-            self._worker.start()
+            try:
+                self._worker.start()
+            except BaseException:
+                self._playing = False
+                self._worker = None
+                raise
 
     def _speak_worker(
         self, text: str, cancel_event: threading.Event, length_scale: float,
@@ -183,10 +204,12 @@ class PiperLocalTTS:
     ) -> None:
         started = time.perf_counter()
         try:
+            generation_started = time.perf_counter()
             audio = self.synthesize(
                 text, cancel_event=cancel_event, length_scale=length_scale,
                 sentence_silence=sentence_silence,
             )
+            self.last_generation_duration_ms = round((time.perf_counter() - generation_started) * 1000, 2)
             if audio.samples.size and not cancel_event.is_set():
                 def on_started() -> None:
                     self.last_first_audio_latency_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -195,8 +218,19 @@ class PiperLocalTTS:
         except Exception as error:
             self.last_error = type(error).__name__
         finally:
+            if self.last_generation_duration_ms is None:
+                self.last_generation_duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            for name in (
+                "last_audio_callback_span_ms", "last_playback_duration_ms",
+                "last_output_drain_ms", "last_output_close_ms",
+            ):
+                value = getattr(self.output, name, None)
+                if value is not None:
+                    setattr(self, name, float(value))
             with self._lock:
                 self._playing = False
+                if self._worker is threading.current_thread():
+                    self._worker = None
 
     def stop(self) -> None:
         with self._lock:

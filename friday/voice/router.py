@@ -296,6 +296,26 @@ class TTSRouter:
     def last_first_audio_latency_ms(self):
         return getattr(self._active, "last_first_audio_latency_ms", None)
 
+    @property
+    def last_generation_duration_ms(self):
+        return getattr(self._active, "last_generation_duration_ms", None)
+
+    @property
+    def last_audio_callback_span_ms(self):
+        return getattr(self._active, "last_audio_callback_span_ms", None)
+
+    @property
+    def last_playback_duration_ms(self):
+        return getattr(self._active, "last_playback_duration_ms", None)
+
+    @property
+    def last_output_drain_ms(self):
+        return getattr(self._active, "last_output_drain_ms", None)
+
+    @property
+    def last_output_close_ms(self):
+        return getattr(self._active, "last_output_close_ms", None)
+
     def speak(self, text: str) -> None:
         self._active = self.piper
         self.last_route = "piper"

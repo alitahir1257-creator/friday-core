@@ -17,6 +17,7 @@ from friday.router import RoutingDecision, Router, create_router
 from friday.router import Route
 from friday.system_one import HostedJevProvider, RemoteLayaProvider, SystemOneManager
 from friday.capabilities.computer.controller import ComputerController
+from friday.capabilities.computer.parser import CanonicalComputerIntentParser
 from friday.capabilities.registry import Capability
 from friday.vision import VisionManager
 from friday.mcp import MCPClientManager
@@ -146,6 +147,12 @@ class FridayCore:
         history_override: list[dict[str, str]] | None = None,
     ) -> tuple[str, int | None, RoutingDecision]:
         decision = self._router.route(command)
+        canonical_intent = CanonicalComputerIntentParser().parse(command)
+        if canonical_intent is not None:
+            decision = RoutingDecision(
+                Route.COMPUTER, 1.0,
+                f"Canonical tool intent resolved for {canonical_intent.tool_name}", canonical_intent.source,
+            )
         requested_privacy = (
             request_metadata.effective_privacy if request_metadata is not None else None
         )
@@ -167,15 +174,15 @@ class FridayCore:
             requested_policy=request_metadata.task_class if request_metadata is not None else None,
             cloudflare_enabled=bool(getattr(self._brain_manager, "cloud_enabled", False)),
         )
-        multi_step = is_multi_step_request(command) or document_request
-        if decision.route == Route.COMPUTER:
+        multi_step = (is_multi_step_request(command) or document_request) and canonical_intent is None
+        if decision.route == Route.COMPUTER and canonical_intent is None:
             deterministic_plan = self._deterministic_computer_plan(command)
             multi_step = multi_step or bool(
                 deterministic_plan is not None and len(deterministic_plan.actions) > 1
             )
 
         namespace = request_metadata.memory_namespace if request_metadata is not None else "global"
-        if selection.policy == ModelPolicy.CODING:
+        if selection.policy == ModelPolicy.CODING and canonical_intent is None:
             decision = RoutingDecision(
                 Route.CODING, 1.0, selection.reason, "model_policy",
             )
@@ -188,11 +195,13 @@ class FridayCore:
             )
             return "Repository work is assigned to Codex; FRIDAY chat fallback is disabled.", None, decision
 
-        research_requested = (
+        research_requested = canonical_intent is None and (
             selection.policy == ModelPolicy.RESEARCH
             or self._model_policy_engine.requires_research(command)
         )
-        structured_api_requested = self.planner.has_public_api_intent(command, privacy=privacy.value)
+        structured_api_requested = canonical_intent is None and self.planner.has_public_api_intent(
+            command, privacy=privacy.value,
+        )
         if (
             research_requested
             and not self.tool_registry.find_by_capability("research")
@@ -211,7 +220,7 @@ class FridayCore:
         is_memory_recall = decision.route == Route.MEMORY and not re.search(
             r"\b(?:remember|yaad\s+rakh)\b", command, re.IGNORECASE,
         )
-        if (self._is_knowledge_lookup(command) or is_memory_recall) and not multi_step:
+        if canonical_intent is None and (self._is_knowledge_lookup(command) or is_memory_recall) and not multi_step:
             privacy_value = getattr(privacy, "value", privacy)
             result = self.tool_registry.execute(
                 "knowledge.search",
@@ -290,7 +299,7 @@ class FridayCore:
             ModelPolicy.CODING: Route.CODING,
             ModelPolicy.RESEARCH: Route.RESEARCH,
         }
-        if selection.policy in policy_routes and decision.route != policy_routes[selection.policy]:
+        if canonical_intent is None and selection.policy in policy_routes and decision.route != policy_routes[selection.policy]:
             decision = RoutingDecision(
                 route=policy_routes[selection.policy],
                 confidence=1.0,
@@ -308,7 +317,10 @@ class FridayCore:
             started = time.perf_counter()
             if on_status is not None:
                 on_status("EXECUTING")
-            tool_name, arguments = self._computer_tool(command)
+            if canonical_intent is not None:
+                tool_name, arguments = canonical_intent.tool_name, canonical_intent.arguments
+            else:
+                tool_name, arguments = self._computer_tool(command)
             privacy_value = getattr(selection.privacy, "value", selection.privacy)
             action_metadata = {"route": decision.route.value, "route_source": decision.source}
             result = self.tool_registry.execute(

@@ -10,6 +10,8 @@ import winreg
 from dataclasses import dataclass
 from pathlib import Path
 
+from friday.runtime_config import child_process_environment
+
 
 def normalize(name: str) -> str:
     name = name.casefold().replace("&", " and ")
@@ -56,7 +58,10 @@ class AppResolver:
             "Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress -Depth 2",
         ]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=20, check=True)
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=20, check=True,
+                env=child_process_environment(),
+            )
             entries = json.loads(completed.stdout or "[]")
             for item in entries if isinstance(entries, list) else [entries]:
                 if item.get("Name") and item.get("AppID"):
@@ -94,9 +99,14 @@ class AppResolver:
         return len(self.apps)
 
     def resolve(self, request: str) -> InstalledApp:
+        query = normalize(request)
+        windir = os.environ.get("WINDIR")
+        if query == "calculator" and windir:
+            calculator = Path(windir) / "System32" / "calc.exe"
+            if calculator.is_file():
+                return InstalledApp("Calculator", "app_path", str(calculator))
         if not self.apps:
             self.refresh()
-        query = normalize(request)
         # A spelling expansion, not an application allowlist.
         query = re.sub(r"\bvs\b", "visual studio", query)
         exact = [app for app in self.apps if normalize(app.name) == query]
@@ -119,7 +129,10 @@ class AppResolver:
             if "\x00" in app.launch_target or "/" in app.launch_target:
                 raise AppResolutionError("The installed app identifier is invalid.")
             explorer = Path(os.environ["WINDIR"]) / "explorer.exe"
-            subprocess.Popen([str(explorer), "shell:AppsFolder\\" + app.launch_target], close_fds=True)
+            subprocess.Popen(
+                [str(explorer), "shell:AppsFolder\\" + app.launch_target],
+                close_fds=True, env=child_process_environment(),
+            )
         else:
-            subprocess.Popen([app.launch_target], close_fds=True)
+            subprocess.Popen([app.launch_target], close_fds=True, env=child_process_environment())
         return app
