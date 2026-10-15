@@ -15,6 +15,7 @@ VOICE_CACHE_DIR = Path(r"D:\FRIDAY\data\cache\voice")
 STT_MODEL_DIR = VOICE_MODELS_DIR / "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
 WAKE_MODEL_DIR = VOICE_MODELS_DIR / "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 DEFAULT_TTS_MODEL = VOICE_MODELS_DIR / "en_US-lessac-medium.onnx"
+JOHN_TTS_MODEL = VOICE_MODELS_DIR / "en_US-john-medium.onnx"
 WHISPER_CPP_EXECUTABLE = Path(r"D:\FRIDAY\runtime\voice\whisper.cpp\Release\whisper-cli.exe")
 WHISPER_CPP_MODEL = Path(r"D:\FRIDAY\models\voice\whisper\ggml-tiny-q5_1.bin")
 GEMINI_STT_CONFIG_PATH = Path(r"D:\FRIDAY\config\voice-stt.json")
@@ -38,6 +39,25 @@ class VoiceMode(str, Enum):
     WAKE = "wake"
     PTT = "ptt"
 
+
+@dataclass(frozen=True)
+class VoiceProfile:
+    id: str
+    display_name: str
+    voice_character: str
+    language: str
+    engine: str
+    model_path: Path
+
+    @property
+    def config_path(self) -> Path:
+        return Path(str(self.model_path) + ".json")
+
+
+VOICE_PROFILES = {
+    "lessac": VoiceProfile("lessac", "Lessac", "female", "en_US", "piper", DEFAULT_TTS_MODEL),
+    "john": VoiceProfile("john", "John", "male", "en_US", "piper", JOHN_TTS_MODEL),
+}
 
 SPEAKING_SPEED_SCALES = {"slow": 1.15, "normal": 1.0, "fast": 0.85}
 
